@@ -59,13 +59,16 @@ function timingSafeStringEqual(a, b) {
 }
 
 // ── Integration seam ──────────────────────────────────────────────────────
-// Real AI reply generation (Phase 6) — replaces PR7's deterministic
-// echo/ack stub. `db` and `fetchImpl` are threaded through from
-// createWebhookRouter()'s own params (the injectable-fetch DI pattern used
-// throughout this repo); no parallel/duplicate reply path is built here —
-// this is the ONLY place that calls src/brain/index.js generateReply().
-async function processIncomingMessage(db, text, media, { fetchImpl } = {}) {
-  return brain.generateReply(db, { text, media }, { fetchImpl });
+// Real AI reply generation (Phase 6, extended Phase 7). `db` and
+// `fetchImpl` are threaded through from createWebhookRouter()'s own params
+// (the injectable-fetch DI pattern used throughout this repo); no parallel/
+// duplicate reply path is built here — this is the ONLY place that calls
+// src/brain/index.js generateReply(). `from` (Phase 7) lets the control-tag
+// effect pipeline (e.g. escalateHuman) know which customer to reference —
+// generateReply()'s returned string is always the tag-free, customer-safe
+// reply text.
+async function processIncomingMessage(db, from, text, media, { fetchImpl } = {}) {
+  return brain.generateReply(db, { text, media, from }, { fetchImpl });
 }
 
 /**
@@ -198,7 +201,7 @@ function createWebhookRouter(
     // decides it's time (see client.sendPacedReply()).
     await client.markAsRead(creds, { messageId }, { fetchImpl });
 
-    const replyText = await processIncomingMessage(db, customerText, media, { fetchImpl });
+    const replyText = await processIncomingMessage(db, from, customerText, media, { fetchImpl });
 
     let sendResult = null;
     if (replyText) {

@@ -35,11 +35,24 @@
 // entry — mirroring the source's callGemini(systemPrompt, userMessage,
 // conversationHistory, media) shape. generateContent() would need a new
 // `history` param threaded into its `contents` array construction.
+//
+// PR9 / Phase 7 — control-tag pipeline (design.md "Effect (enforcement)"
+// layer, the hard guarantee behind the prompt's probabilistic protocol
+// instructions in prompt.js): every Gemini reply is run through
+// src/agent/pipeline.js's runPipeline() BEFORE this function returns. The
+// return value is ALWAYS `cleanReply` — raw bracket-tag syntax must never
+// reach the customer, regardless of which effects are fully wired yet (see
+// src/agent/effects/* for what's real vs. a documented stub). Effect calls
+// the pipeline emits are dispatched via src/agent/effects/index.js's
+// dispatchEffectCalls(), threading `db`/`fetchImpl`/the new `from` input
+// param through to whichever handlers need them.
 
 const store = require('../config/store');
 const capabilities = require('../config/capabilities');
 const { buildSystemPrompt } = require('./prompt');
 const gemini = require('./gemini');
+const pipeline = require('../agent/pipeline');
+const { dispatchEffectCalls } = require('../agent/effects');
 
 const FALLBACK_NOT_CONFIGURED =
   'Lo siento, en este momento no puedo responder automáticamente. El equipo te contactará en breve.';
@@ -48,11 +61,14 @@ const FALLBACK_ERROR =
 
 /**
  * @param {import('better-sqlite3').Database} db
- * @param {{text: string, media?: {mimeType: string, data: Buffer|string}|null}} input
+ * @param {{
+ *   text: string, media?: {mimeType: string, data: Buffer|string}|null,
+ *   from?: string,
+ * }} input
  * @param {{fetchImpl?: typeof fetch}} [opts]
  * @returns {Promise<string>}
  */
-async function generateReply(db, { text, media } = {}, { fetchImpl } = {}) {
+async function generateReply(db, { text, media, from } = {}, { fetchImpl } = {}) {
   if (!capabilities.isIntegrationActive(db, 'gemini')) {
     console.warn('[BRAIN] gemini integration not active — returning fallback reply');
     return FALLBACK_NOT_CONFIGURED;
@@ -80,7 +96,27 @@ async function generateReply(db, { text, media } = {}, { fetchImpl } = {}) {
     return FALLBACK_ERROR;
   }
 
-  return result.text || FALLBACK_ERROR;
+  if (!result.text) return FALLBACK_ERROR;
+
+  // Run the control-tag pipeline on the RAW model output — this is the
+  // enforcement layer design.md calls "the hard guarantee". cleanReply is
+  // what gets returned below no matter what; effectCalls/dropped only
+  // decide what ELSE happens (an effect dispatch, or a logged
+  // [TAG_DROPPED]), never whether the text itself is safe to send.
+  const { cleanReply, effectCalls } = pipeline.runPipeline(result.text, { capabilities: caps });
+
+  if (effectCalls.length) {
+    try {
+      await dispatchEffectCalls(effectCalls, { db, fetchImpl, from });
+    } catch (err) {
+      // Defense in depth — dispatchEffectCalls() already swallows individual
+      // handler errors, but the customer-visible reply must never depend on
+      // effect dispatch succeeding.
+      console.error('[BRAIN] effect dispatch failed unexpectedly:', err.message);
+    }
+  }
+
+  return cleanReply;
 }
 
 module.exports = { generateReply };

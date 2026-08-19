@@ -316,6 +316,66 @@ test('POST /webhook wires a real Gemini reply through when gemini is active + co
   }
 });
 
+test('POST /webhook — full round trip: a Gemini reply containing control tags reaches the customer tag-free and dispatches the escalate-to-admin effect (Phase 7 runtime harness, substitutes for a live Meta test-number send)', async () => {
+  let resolveProcessed;
+  const processed = new Promise((resolve) => { resolveProcessed = resolve; });
+  const graphCalls = [];
+
+  const fetchImpl = async (url, opts) => {
+    if (url.includes('generativelanguage.googleapis.com')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          candidates: [{
+            finishReason: 'STOP',
+            content: { parts: [{ text: 'Un momento, te comunico con el equipo.[ESCALAR_HUMANO:cliente pide hablar con alguien]' }] },
+          }],
+        }),
+      };
+    }
+    graphCalls.push({ url, opts });
+    return { ok: true, status: 200, json: async () => ({ messages: [{ id: 'wamid.fake' }] }) };
+  };
+
+  const server = await bootServer({ fetchImpl, onMessageProcessed: (info) => resolveProcessed(info) });
+  store.activateIntegration(server.db, 'gemini', {
+    credentials: { api_key: 'AIzaFAKE', model: 'gemini-2.5-flash' },
+    publicMeta: { model: 'gemini-2.5-flash' },
+  });
+  store.setIntegrationEnabled(server.db, 'gemini', true);
+  store.updateAppConfig(server.db, { adminPhone: '5215500009999' });
+
+  const payload = textMessagePayload({ text: 'Quiero hablar con una persona' });
+  const bodyStr = JSON.stringify(payload);
+  const res = await httpPost(server, '/webhook', payload, { headers: { 'x-hub-signature-256': sign(bodyStr) } });
+  assert.equal(res.statusCode, 200);
+
+  try {
+    const info = await withTimeout(processed, 2000, 'message processing');
+    // Customer-visible reply is tag-free — the guarantee this whole phase exists for.
+    assert.doesNotMatch(info.replyText, /\[/);
+    assert.match(info.replyText, /Un momento, te comunico con el equipo\./);
+
+    // The escalate-to-admin effect actually ran: one of the outbound Graph
+    // API calls (besides markAsRead/sendPacedReply's own send to the
+    // customer) targets the configured admin phone.
+    const adminCall = graphCalls.find((c) => {
+      try {
+        return JSON.parse(c.opts.body).to === '5215500009999';
+      } catch {
+        return false;
+      }
+    });
+    assert.ok(adminCall, 'expected an outbound Graph API call notifying the configured admin phone');
+    const adminBody = JSON.parse(adminCall.opts.body);
+    assert.match(adminBody.text.body, /5215500000001/);
+    assert.match(adminBody.text.body, /cliente pide hablar con alguien/);
+  } finally {
+    await server.close();
+  }
+});
+
 test('POST /webhook ignores messages for a phone_number_id that does not match the configured one', async () => {
   let called = false;
   const server = await bootServer({ onMessageProcessed: () => { called = true; } });
