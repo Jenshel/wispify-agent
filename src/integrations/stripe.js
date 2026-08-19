@@ -44,6 +44,78 @@ async function validate({ secretKey } = {}, { fetchImpl = fetch } = {}) {
   };
 }
 
+/**
+ * Build a Stripe Checkout Session with dynamic line_items derived from an
+ * order's products (design.md "Payments (generic only)": "builds a Checkout
+ * Session with dynamic line_items[i][price_data] from the order's
+ * products... client_reference_id=orderId + metadata[orderId]"). No fixed
+ * per-plan price tiers — spec's explicit boundary.
+ *
+ * Reuses the SAME Basic-auth pattern validate() already uses (secretKey as
+ * the HTTP Basic username, empty password) rather than inventing a second
+ * auth shape in this module.
+ *
+ * @param {{secretKey: string}} credentials
+ * @param {{
+ *   orderId: string,
+ *   products: Array<{name: string, qty: number, price: number}>,
+ *   currency: string, successUrl: string, cancelUrl: string,
+ * }} order
+ * @param {{fetchImpl?: typeof fetch}} [opts]
+ * @returns {Promise<{ok: boolean, id?: string, url?: string, error?: string}>}
+ */
+async function createCheckoutSession(
+  { secretKey } = {},
+  { orderId, products, currency = 'usd', successUrl, cancelUrl } = {},
+  { fetchImpl = fetch } = {}
+) {
+  if (!secretKey) return { ok: false, error: 'secretKey is required' };
+  if (!Array.isArray(products) || products.length === 0) {
+    return { ok: false, error: 'order has no products — nothing to check out' };
+  }
+
+  const params = new URLSearchParams();
+  params.append('mode', 'payment');
+  params.append('success_url', successUrl);
+  params.append('cancel_url', cancelUrl);
+  params.append('client_reference_id', orderId);
+  params.append('metadata[orderId]', orderId);
+
+  let lineItemIndex = 0;
+  for (const product of products) {
+    const unitAmount = Math.round((Number(product.price) || 0) * 100);
+    const qty = Number(product.qty) || 1;
+    if (unitAmount <= 0) continue; // a free/invalid line item is skipped, mirrors the source's own guard
+    params.append(`line_items[${lineItemIndex}][quantity]`, String(qty));
+    params.append(`line_items[${lineItemIndex}][price_data][currency]`, String(currency).toLowerCase());
+    params.append(`line_items[${lineItemIndex}][price_data][unit_amount]`, String(unitAmount));
+    params.append(`line_items[${lineItemIndex}][price_data][product_data][name]`, String(product.name || 'Producto').slice(0, 100));
+    lineItemIndex += 1;
+  }
+  if (lineItemIndex === 0) return { ok: false, error: 'order has no valid (positive-price) line items' };
+
+  let response;
+  try {
+    response = await fetchImpl(`${STRIPE_API_BASE}/checkout/sessions`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Basic ${Buffer.from(`${secretKey}:`).toString('base64')}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: params.toString(),
+    });
+  } catch (err) {
+    return { ok: false, error: `network error contacting Stripe API: ${err.message}` };
+  }
+
+  const body = await safeJson(response);
+  if (!response.ok) {
+    return { ok: false, error: body?.error?.message || `Stripe API returned HTTP ${response.status}` };
+  }
+
+  return { ok: true, id: body.id, url: body.url };
+}
+
 async function safeJson(response) {
   try {
     return await response.json();
@@ -52,4 +124,4 @@ async function safeJson(response) {
   }
 }
 
-module.exports = { validate, STRIPE_API_BASE };
+module.exports = { validate, createCheckoutSession, STRIPE_API_BASE };

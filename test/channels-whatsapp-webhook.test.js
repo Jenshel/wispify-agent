@@ -464,6 +464,89 @@ test('POST /webhook — full round trip: a Gemini reply containing [CITA_CONFIRM
   }
 });
 
+test('POST /webhook — full round trip: a Gemini reply containing [PEDIDO_CONFIRMADO] creates a pending order and sends a real /pay/:orderId link to the customer (Phase 9 runtime harness, substitutes for a live Meta test-number send)', async () => {
+  let resolveProcessed;
+  const processed = new Promise((resolve) => { resolveProcessed = resolve; });
+  const graphCalls = [];
+  const orders = require('../src/db/orders');
+
+  const fetchImpl = async (url, opts) => {
+    if (url.includes('generativelanguage.googleapis.com')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          candidates: [{
+            finishReason: 'STOP',
+            content: {
+              parts: [{
+                text:
+                  '¡Perfecto! Tu pedido quedó registrado.\n' +
+                  '[PEDIDO_CONFIRMADO]\n' +
+                  'Camisa x2 $150\n' +
+                  'Total: $300\n' +
+                  '[/PEDIDO_CONFIRMADO]',
+              }],
+            },
+          }],
+        }),
+      };
+    }
+    graphCalls.push({ url, opts });
+    return { ok: true, status: 200, json: async () => ({ messages: [{ id: 'wamid.fake' }] }) };
+  };
+
+  let prevBaseUrl = process.env.PUBLIC_BASE_URL;
+  process.env.PUBLIC_BASE_URL = 'https://bot.example.com';
+
+  const server = await bootServer({ fetchImpl, onMessageProcessed: (info) => resolveProcessed(info) });
+  try {
+    store.activateIntegration(server.db, 'gemini', {
+      credentials: { api_key: 'AIzaFAKE', model: 'gemini-2.5-flash' },
+      publicMeta: { model: 'gemini-2.5-flash' },
+    });
+    store.setIntegrationEnabled(server.db, 'gemini', true);
+    store.activateIntegration(server.db, 'stripe', {
+      credentials: { secret_key: 'sk_test_FAKE', webhook_secret: 'whsec_test' },
+      publicMeta: { livemode: false },
+    });
+    store.setIntegrationEnabled(server.db, 'stripe', true);
+
+    const payload = textMessagePayload({ text: 'Quiero 2 camisas' });
+    const bodyStr = JSON.stringify(payload);
+    const res = await httpPost(server, '/webhook', payload, { headers: { 'x-hub-signature-256': sign(bodyStr) } });
+    assert.equal(res.statusCode, 200);
+
+    const info = await withTimeout(processed, 2000, 'message processing');
+    // Customer-visible reply is tag-free — the guarantee this whole phase exists for.
+    assert.doesNotMatch(info.replyText, /\[/);
+    assert.match(info.replyText, /pedido quedó registrado/);
+
+    // A real, pending order row was created.
+    const allOrders = server.db.prepare('SELECT * FROM orders').all();
+    assert.equal(allOrders.length, 1);
+    const order = orders.getOrderById(server.db, allOrders[0].id);
+    assert.equal(order.status, 'pending');
+    assert.equal(order.customerPhone, '5215500000001');
+    assert.equal(order.total, 300);
+
+    // The customer received a real WhatsApp message with a working /pay/:orderId link.
+    const confirmCall = graphCalls.find((c) => {
+      try {
+        const body = JSON.parse(c.opts.body);
+        return body.to === '5215500000001' && new RegExp(`/pay/${order.id}`).test(body.text?.body || '');
+      } catch {
+        return false;
+      }
+    });
+    assert.ok(confirmCall, 'expected a WhatsApp message containing the /pay/:orderId link');
+  } finally {
+    if (prevBaseUrl === undefined) delete process.env.PUBLIC_BASE_URL;
+    else process.env.PUBLIC_BASE_URL = prevBaseUrl;
+    await server.close();
+  }
+});
+
 test('POST /webhook ignores messages for a phone_number_id that does not match the configured one', async () => {
   let called = false;
   const server = await bootServer({ onMessageProcessed: () => { called = true; } });

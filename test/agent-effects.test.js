@@ -14,9 +14,11 @@
 // "update the obsolete test with a documented comment" pattern PR8/PR9 used
 // on their own predecessors' stub-era assertions).
 //
-// Two remaining DOCUMENTED STUBS (seam only — real implementation lands
-// with the phase that builds the table/integration each one needs):
-//   - confirmOrder: Phase 9 (Stripe generic per-order checkout)
+// confirmOrder is now REAL as of PR11 (Phase 9 — generic Stripe checkout),
+// same replace-the-stub-section pattern again — see its own section below.
+//
+// One remaining DOCUMENTED STUB (seam only — real implementation lands with
+// the phase that builds the table each one needs):
 //   - sendPhoto: no catalog table exists yet in ANY phase's task list yet —
 //     stub documents this explicitly rather than guessing a future phase.
 //
@@ -36,6 +38,7 @@ const { confirmAppointment } = require('../src/agent/effects/appointment');
 const { confirmOrder } = require('../src/agent/effects/order');
 const { sendPhoto } = require('../src/agent/effects/photos');
 const appointments = require('../src/db/appointments');
+const orders = require('../src/db/orders');
 const googleCalendar = require('../src/integrations/google-calendar');
 
 let prevKey;
@@ -313,13 +316,97 @@ test('confirmAppointment() resolves without throwing (and without booking) when 
   assert.equal(result.ok, false);
 });
 
-// ── confirmOrder — documented stub (Phase 9 owns the real thing) ─────────
+// ── confirmOrder — real as of PR11 (Phase 9, replacing PR9's stub) ───────
+// Creates the `orders` row (status='pending') and sends the customer a
+// `/pay/:orderId` link over WhatsApp — the real Stripe Checkout Session
+// itself is built lazily by src/routes/payments.js's GET /pay/:orderId (only
+// when the customer actually clicks), not here; see that route + this
+// file's own header comment for why.
 
-test('confirmOrder() resolves with a stub result, never throws, and never actually charges/creates a checkout session', async () => {
+let prevBaseUrl;
+before(() => {
+  prevBaseUrl = process.env.PUBLIC_BASE_URL;
+});
+after(() => {
+  if (prevBaseUrl === undefined) delete process.env.PUBLIC_BASE_URL;
+  else process.env.PUBLIC_BASE_URL = prevBaseUrl;
+});
+
+test('confirmOrder() resolves without creating an order when no db is provided in ctx', async () => {
   const result = await confirmOrder({ products: [{ name: 'Camisa', qty: 1, price: 100 }], total: 100, from: '5215500000001' }, {});
   assert.equal(result.ok, false);
-  assert.equal(result.stub, true);
-  assert.ok(result.reason);
+  assert.equal(result.reason, 'no_db');
+});
+
+test('confirmOrder() resolves without creating an order when no products were parsed', async () => {
+  const db = freshDb();
+  const result = await confirmOrder({ products: [], total: 0, from: '5215500000001' }, { db });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'no_products');
+});
+
+test('confirmOrder() creates a pending order snapshotting app_config.currency, and sends a /pay/:orderId link when PUBLIC_BASE_URL is configured', async () => {
+  process.env.PUBLIC_BASE_URL = 'https://bot.example.com';
+  const db = freshDb();
+  store.updateAppConfig(db, { currency: 'USD' });
+  activateMeta(db);
+  const fetchImpl = fakeMetaFetch();
+
+  const result = await confirmOrder(
+    { products: [{ name: 'Camisa', qty: 2, price: 150 }], total: 300, from: '5215500000001' },
+    { db, fetchImpl }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.total, 300);
+  assert.equal(result.currency, 'USD');
+  assert.equal(result.paymentLink, `https://bot.example.com/pay/${result.id}`);
+
+  const stored = orders.getOrderById(db, result.id);
+  assert.equal(stored.customerPhone, '5215500000001');
+  assert.equal(stored.status, 'pending');
+  assert.equal(stored.currency, 'USD');
+  assert.deepEqual(stored.products, [{ name: 'Camisa', qty: 2, price: 150 }]);
+
+  const notifyCall = fetchImpl.calls.find((c) => c.url.includes('/messages'));
+  assert.ok(notifyCall);
+  assert.match(JSON.parse(notifyCall.opts.body).text.body, new RegExp(`https://bot\\.example\\.com/pay/${result.id}`));
+});
+
+test('confirmOrder() falls back to app_config default currency (MXN) when none is set', async () => {
+  process.env.PUBLIC_BASE_URL = 'https://bot.example.com';
+  const db = freshDb();
+  activateMeta(db);
+  const fetchImpl = fakeMetaFetch();
+  const result = await confirmOrder({ products: [{ name: 'X', qty: 1, price: 10 }], total: 10, from: '5215500000001' }, { db, fetchImpl });
+  assert.equal(result.currency, 'MXN');
+});
+
+test('confirmOrder() still creates the order but tells the customer staff will follow up (no broken link) when PUBLIC_BASE_URL is not configured', async () => {
+  delete process.env.PUBLIC_BASE_URL;
+  const db = freshDb();
+  activateMeta(db);
+  const fetchImpl = fakeMetaFetch();
+
+  const result = await confirmOrder({ products: [{ name: 'Camisa', qty: 1, price: 100 }], total: 100, from: '5215500000001' }, { db, fetchImpl });
+  assert.equal(result.ok, true);
+  assert.equal(result.paymentLink, null);
+
+  const notifyCall = fetchImpl.calls.find((c) => c.url.includes('/messages'));
+  assert.ok(notifyCall);
+  const text = JSON.parse(notifyCall.opts.body).text.body;
+  assert.doesNotMatch(text, /https?:\/\//);
+});
+
+test('confirmOrder() never throws even when the WhatsApp notification send fails', async () => {
+  const db = freshDb();
+  activateMeta(db);
+  const fetchImpl = async () => {
+    throw new Error('network down');
+  };
+  await assert.doesNotReject(() =>
+    confirmOrder({ products: [{ name: 'X', qty: 1, price: 10 }], total: 10, from: '5215500000001' }, { db, fetchImpl })
+  );
 });
 
 // ── sendPhoto — documented stub (no catalog table exists in any phase yet) ─
