@@ -49,3 +49,31 @@ CREATE TABLE IF NOT EXISTS admin_sessions (
   expires_at  INTEGER NOT NULL,
   created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
+
+-- Appointment bookkeeping for the [CITA_CONFIRMADA] booking effect (Phase 8,
+-- src/agent/effects/appointment.js). Google Calendar remains the sole
+-- booking backend (spec: "no local-storage fallback") — this table is NOT
+-- an alternate backend, it only tracks what this bot has confirmed so the
+-- past-time/double-booking guards (Phase 8.1/8.2) and the reminder job
+-- (Phase 8.4, src/jobs/appointment-reminders.js) have something to query.
+-- Deliberately its own table, not a reuse of the general-purpose `orders`
+-- table Phase 9 (Stripe) owns — appointments and paid orders are different
+-- concerns/lifecycles; this repo does not overload one polymorphic row
+-- shape for both, unlike the source system's `type: 'appointment'` orders.
+CREATE TABLE IF NOT EXISTS appointments (
+  id                TEXT PRIMARY KEY,
+  customer_phone    TEXT NOT NULL,
+  service           TEXT NOT NULL,
+  date              TEXT NOT NULL,                       -- YYYY-MM-DD, business-local
+  time              TEXT NOT NULL,                        -- HH:MM, business-local
+  duration_minutes  INTEGER NOT NULL DEFAULT 60,
+  payment_method    TEXT,
+  total             REAL NOT NULL DEFAULT 0,
+  status            TEXT NOT NULL DEFAULT 'confirmed',    -- confirmed | cancelled
+  google_event_id   TEXT,
+  meet_link         TEXT,
+  reminder_30_sent  INTEGER NOT NULL DEFAULT 0,
+  reminder_5_sent   INTEGER NOT NULL DEFAULT 0,
+  no_show_sent      INTEGER NOT NULL DEFAULT 0,
+  created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);

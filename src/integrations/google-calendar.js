@@ -18,12 +18,25 @@
 // returning a real HTTP 400 on mismatch) is Phase 3's job — this module only
 // provides the primitives and is unit-tested at that level for now.
 //
-// Meet-link/event-creation logic is deliberately out of scope for this PR
-// (appointment booking lands in a later phase) — this file stops at proving
-// OAuth access works.
+// getAccessToken()/createEvent() (tasks.md Phase 8.2/8.3) extend this same
+// module boundary: real Calendar-event creation + the in-memory
+// access-token cache+refresh (design.md "getAccessToken() caches in memory
+// to expires_at; refresh on demand; invalid_grant -> status='error' and the
+// scheduling gate closes automatically"). This module still never touches
+// store.js or Express — it takes credentials directly (same shape
+// validate() already does) and returns/throws plain results; the caller
+// (src/agent/effects/appointment.js, which already imports store.js) is
+// responsible for actually persisting a status='error' on an invalid_grant
+// error (surfaced here as `err.code === 'invalid_grant'`).
+//
+// Meet-link creation is attempted first and falls back to a plain event
+// (no Meet link) if conference creation isn't supported/fails for that
+// calendar — never failing the whole booking over a Meet-link failure
+// (PR3/design.md risk note), PORTED from the source's createCalendarEvent()
+// try/catch-and-retry-without-conferenceData shape.
 //
 // fetchImpl is injectable so this module's test suite runs fully
-// offline/deterministic — see tasks.md Phase 2.3/2.4.
+// offline/deterministic — see tasks.md Phase 2.3/2.4/8.2/8.3.
 
 const crypto = require('crypto');
 
@@ -31,6 +44,24 @@ const GOOGLE_OAUTH_SCOPES = ['https://www.googleapis.com/auth/calendar'];
 const GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const GOOGLE_CALENDAR_LIST_URL = 'https://www.googleapis.com/calendar/v3/users/me/calendarList';
+
+function eventsUrlFor(calendarId) {
+  return `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events`;
+}
+
+// Google access tokens last ~60min; refresh a little early so a
+// long-running effect call never races an in-flight expiry.
+const ACCESS_TOKEN_TTL_MS = 55 * 60 * 1000;
+
+function createTokenCache() {
+  return { accessToken: null, expiresAt: 0 };
+}
+
+// Module-scoped default so a real caller that doesn't pass its own `cache`
+// still benefits from the design-mandated in-memory cache; tests always
+// pass their own fresh cache (see test/integrations-google-calendar.test.js)
+// so cases never bleed into each other.
+const defaultTokenCache = createTokenCache();
 
 const POST_AUTH_REDIRECT_PATH = '/panel/settings?google=ok';
 
@@ -160,6 +191,142 @@ async function validate({ accessToken, refreshToken } = {}, { fetchImpl = fetch 
   };
 }
 
+/**
+ * Returns a valid Calendar access token, using the cache when still fresh
+ * and refreshing via the refresh_token grant on demand otherwise
+ * (design.md: "getAccessToken() caches in memory to expires_at; refresh on
+ * demand"). Throws with `err.code === 'invalid_grant'` when Google reports
+ * the refresh token itself is no longer valid (revoked/expired) — the
+ * caller owns closing the integration's status='error' gate on that
+ * specific error (this module never touches store.js/Express).
+ *
+ * @param {{accessToken?: string, refreshToken?: string}} credentials
+ * @param {{
+ *   fetchImpl?: typeof fetch,
+ *   cache?: {accessToken: string|null, expiresAt: number},
+ *   clientId?: string, clientSecret?: string,
+ * }} [opts]
+ * @returns {Promise<string>}
+ */
+async function getAccessToken(
+  { accessToken, refreshToken } = {},
+  {
+    fetchImpl = fetch,
+    cache = defaultTokenCache,
+    clientId = process.env.GOOGLE_CLIENT_ID,
+    clientSecret = process.env.GOOGLE_CLIENT_SECRET,
+  } = {}
+) {
+  if (cache.accessToken && cache.expiresAt > Date.now()) {
+    return cache.accessToken;
+  }
+
+  if (!refreshToken) {
+    // Nothing to refresh with — fall back to whatever access token we were
+    // given (may already be stale; there is simply no better option here).
+    if (!accessToken) throw new Error('no Google Calendar access token or refresh token available');
+    cache.accessToken = accessToken;
+    cache.expiresAt = Date.now() + ACCESS_TOKEN_TTL_MS;
+    return accessToken;
+  }
+
+  const body = new URLSearchParams({
+    refresh_token: refreshToken,
+    client_id: clientId,
+    client_secret: clientSecret,
+    grant_type: 'refresh_token',
+  });
+
+  let response;
+  try {
+    response = await fetchImpl(GOOGLE_TOKEN_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+    });
+  } catch (err) {
+    throw new Error(`network error refreshing Google Calendar access token: ${err.message}`);
+  }
+
+  const parsed = await safeJson(response);
+
+  if (!response.ok) {
+    const message = parsed?.error_description || parsed?.error || `Google OAuth token refresh returned HTTP ${response.status}`;
+    const err = new Error(message);
+    if (parsed?.error === 'invalid_grant') err.code = 'invalid_grant';
+    throw err;
+  }
+
+  cache.accessToken = parsed.access_token;
+  cache.expiresAt = Date.now() + (parsed.expires_in ? parsed.expires_in * 1000 - 60_000 : ACCESS_TOKEN_TTL_MS);
+  return cache.accessToken;
+}
+
+/**
+ * Create a real Calendar event, attempting a Google Meet conference link
+ * first and falling back to a plain event (no Meet link) if conference
+ * creation isn't supported/fails for that calendar — never failing the
+ * whole booking over a Meet-link failure (design.md/PR3 risk note).
+ *
+ * @param {{accessToken?: string, refreshToken?: string, calendarId: string}} credentials
+ * @param {{summary: string, description?: string, startIso: string, endIso: string, timeZone?: string}} eventInput
+ * @param {{fetchImpl?: typeof fetch, cache?: object}} [opts]
+ * @returns {Promise<{id: string, meetLink: string|null, htmlLink: string|null}>}
+ */
+async function createEvent(
+  { accessToken, refreshToken, calendarId },
+  { summary, description = '', startIso, endIso, timeZone = 'America/Mexico_City' } = {},
+  { fetchImpl = fetch, cache } = {}
+) {
+  if (!calendarId) throw new Error('calendarId is required to create a Calendar event');
+
+  const token = await getAccessToken({ accessToken, refreshToken }, { fetchImpl, cache });
+  const event = {
+    summary,
+    description,
+    start: { dateTime: startIso, timeZone },
+    end: { dateTime: endIso, timeZone },
+  };
+  const eventsUrl = eventsUrlFor(calendarId);
+  const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+  let response;
+  try {
+    response = await fetchImpl(`${eventsUrl}?conferenceDataVersion=1`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        ...event,
+        conferenceData: {
+          createRequest: { requestId: crypto.randomUUID(), conferenceSolutionKey: { type: 'hangoutsMeet' } },
+        },
+      }),
+    });
+  } catch (err) {
+    throw new Error(`network error creating Calendar event: ${err.message}`);
+  }
+
+  let body = await safeJson(response);
+
+  if (!response.ok) {
+    console.log('[CALENDAR] Conference creation not supported, creating event without Meet link');
+    try {
+      response = await fetchImpl(eventsUrl, { method: 'POST', headers, body: JSON.stringify(event) });
+    } catch (err) {
+      throw new Error(`network error creating Calendar event: ${err.message}`);
+    }
+    body = await safeJson(response);
+    if (!response.ok) {
+      throw new Error(body?.error?.message || `Google Calendar API returned HTTP ${response.status}`);
+    }
+  }
+
+  const meetLink =
+    body.hangoutLink || body.conferenceData?.entryPoints?.find((e) => e.entryPointType === 'video')?.uri || null;
+
+  return { id: body.id, meetLink, htmlLink: body.htmlLink || null };
+}
+
 async function safeJson(response) {
   try {
     return await response.json();
@@ -175,6 +342,9 @@ module.exports = {
   getAuthUrl,
   exchangeCodeForTokens,
   validate,
+  createTokenCache,
+  getAccessToken,
+  createEvent,
   GOOGLE_OAUTH_SCOPES,
   GOOGLE_AUTH_URL,
   GOOGLE_TOKEN_URL,

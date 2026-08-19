@@ -12,7 +12,7 @@ const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
 
-const SCHEMA_VERSION = 2; // v2 adds admin_sessions (Phase 3, routes/auth.js)
+const SCHEMA_VERSION = 3; // v3 adds appointments (Phase 8, agent/effects/appointment.js + jobs/appointment-reminders.js)
 const SCHEMA_PATH = path.join(__dirname, 'schema.sql');
 
 const DEFAULT_DATA_DIR = path.join(__dirname, '..', '..', 'data');

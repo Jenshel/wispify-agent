@@ -167,3 +167,148 @@ test('validate() handles a network failure without throwing', async () => {
   assert.equal(result.ok, false);
   assert.match(result.error, /network error/i);
 });
+
+// ── getAccessToken() — tasks.md Phase 8.3 ───────────────────────────────
+
+test('getAccessToken() returns the cached token without hitting the network when still fresh', async () => {
+  const fetchImpl = fakeFetch(jsonResponse(200, {}));
+  const cache = { accessToken: 'cached-token', expiresAt: Date.now() + 60_000 };
+  const token = await calendar.getAccessToken({ refreshToken: 'r' }, { fetchImpl, cache });
+  assert.equal(token, 'cached-token');
+  assert.equal(fetchImpl.calls.length, 0);
+});
+
+test('getAccessToken() refreshes via the refresh_token grant when the cache is empty', async () => {
+  const fetchImpl = fakeFetch(jsonResponse(200, { access_token: 'ya29.new', expires_in: 3600 }));
+  const cache = calendar.createTokenCache();
+  const token = await calendar.getAccessToken(
+    { refreshToken: '1//fake' },
+    { fetchImpl, cache, clientId: 'client-123', clientSecret: 'secret-456' }
+  );
+  assert.equal(token, 'ya29.new');
+  assert.equal(fetchImpl.calls.length, 1);
+  const { url, opts } = fetchImpl.calls[0];
+  assert.equal(url, 'https://oauth2.googleapis.com/token');
+  const params = new URLSearchParams(opts.body);
+  assert.equal(params.get('refresh_token'), '1//fake');
+  assert.equal(params.get('grant_type'), 'refresh_token');
+  assert.equal(params.get('client_id'), 'client-123');
+});
+
+test('getAccessToken() populates the cache so a second call within the token lifetime does not refresh again', async () => {
+  const fetchImpl = fakeFetch(jsonResponse(200, { access_token: 'ya29.new', expires_in: 3600 }));
+  const cache = calendar.createTokenCache();
+  await calendar.getAccessToken({ refreshToken: '1//fake' }, { fetchImpl, cache });
+  await calendar.getAccessToken({ refreshToken: '1//fake' }, { fetchImpl, cache });
+  assert.equal(fetchImpl.calls.length, 1);
+});
+
+test('getAccessToken() falls back to the given accessToken when no refreshToken is available', async () => {
+  const fetchImpl = fakeFetch(jsonResponse(200, {}));
+  const cache = calendar.createTokenCache();
+  const token = await calendar.getAccessToken({ accessToken: 'ya29.direct' }, { fetchImpl, cache });
+  assert.equal(token, 'ya29.direct');
+  assert.equal(fetchImpl.calls.length, 0);
+});
+
+test('getAccessToken() throws with err.code = "invalid_grant" when Google reports the refresh token is revoked/expired', async () => {
+  const fetchImpl = fakeFetch(jsonResponse(400, { error: 'invalid_grant', error_description: 'Token has been expired or revoked.' }));
+  const cache = calendar.createTokenCache();
+  await assert.rejects(
+    () => calendar.getAccessToken({ refreshToken: 'revoked' }, { fetchImpl, cache }),
+    (err) => {
+      assert.equal(err.code, 'invalid_grant');
+      return true;
+    }
+  );
+});
+
+test('getAccessToken() throws a plain error (no .code) on an unrelated refresh failure', async () => {
+  const fetchImpl = fakeFetch(jsonResponse(500, { error: 'server_error' }));
+  const cache = calendar.createTokenCache();
+  await assert.rejects(
+    () => calendar.getAccessToken({ refreshToken: 'x' }, { fetchImpl, cache }),
+    (err) => {
+      assert.equal(err.code, undefined);
+      return true;
+    }
+  );
+});
+
+// ── createEvent() — tasks.md Phase 8.2/8.4 (real Calendar event creation) ─
+
+test('createEvent() creates an event with a Google Meet conference link on success', async () => {
+  const cache = { accessToken: 'ya29.fake', expiresAt: Date.now() + 60_000 };
+  const fetchImpl = fakeFetch(
+    jsonResponse(200, {
+      id: 'evt_abc',
+      htmlLink: 'https://calendar.google.com/event?eid=abc',
+      hangoutLink: 'https://meet.google.com/xyz-abcd-efg',
+    })
+  );
+  const result = await calendar.createEvent(
+    { accessToken: 'ya29.fake', calendarId: 'demo@business.example.com' },
+    { summary: 'Corte — 5215500000001', description: 'desc', startIso: '2030-01-15T15:00:00.000Z', endIso: '2030-01-15T15:30:00.000Z' },
+    { fetchImpl, cache }
+  );
+
+  assert.equal(result.id, 'evt_abc');
+  assert.equal(result.meetLink, 'https://meet.google.com/xyz-abcd-efg');
+  assert.equal(fetchImpl.calls.length, 1);
+  const { url, opts } = fetchImpl.calls[0];
+  assert.match(url, /conferenceDataVersion=1/);
+  assert.equal(opts.headers.Authorization, 'Bearer ya29.fake');
+  const body = JSON.parse(opts.body);
+  assert.equal(body.summary, 'Corte — 5215500000001');
+  assert.ok(body.conferenceData);
+});
+
+test('createEvent() falls back to creating the event WITHOUT a Meet link when conference creation fails, rather than failing the whole booking', async () => {
+  const cache = { accessToken: 'ya29.fake', expiresAt: Date.now() + 60_000 };
+  const calls = [];
+  const fetchImpl = async (url, opts) => {
+    calls.push({ url, opts });
+    if (url.includes('conferenceDataVersion=1')) {
+      return jsonResponse(400, { error: { message: 'conference creation not supported' } });
+    }
+    return jsonResponse(200, { id: 'evt_no_meet', htmlLink: 'https://calendar.google.com/event?eid=xyz' });
+  };
+  fetchImpl.calls = calls;
+
+  const result = await calendar.createEvent(
+    { accessToken: 'ya29.fake', calendarId: 'demo@business.example.com' },
+    { summary: 'Corte', startIso: '2030-01-15T15:00:00.000Z', endIso: '2030-01-15T15:30:00.000Z' },
+    { fetchImpl, cache }
+  );
+
+  assert.equal(result.id, 'evt_no_meet');
+  assert.equal(result.meetLink, null);
+  assert.equal(calls.length, 2);
+});
+
+test('createEvent() throws when the calendar itself rejects the fallback (non-conference) request', async () => {
+  const cache = { accessToken: 'ya29.fake', expiresAt: Date.now() + 60_000 };
+  const fetchImpl = fakeFetch(jsonResponse(403, { error: { message: 'insufficient permissions' } }));
+  await assert.rejects(
+    () =>
+      calendar.createEvent(
+        { accessToken: 'ya29.fake', calendarId: 'demo@business.example.com' },
+        { summary: 'Corte', startIso: '2030-01-15T15:00:00.000Z', endIso: '2030-01-15T15:30:00.000Z' },
+        { fetchImpl, cache }
+      ),
+    /insufficient permissions/
+  );
+});
+
+test('createEvent() throws when calendarId is missing', async () => {
+  const cache = { accessToken: 'ya29.fake', expiresAt: Date.now() + 60_000 };
+  await assert.rejects(
+    () =>
+      calendar.createEvent(
+        { accessToken: 'ya29.fake' },
+        { summary: 'Corte', startIso: '2030-01-15T15:00:00.000Z', endIso: '2030-01-15T15:30:00.000Z' },
+        { fetchImpl: fakeFetch(jsonResponse(200, {})), cache }
+      ),
+    /calendarId/
+  );
+});
