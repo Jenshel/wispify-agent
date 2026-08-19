@@ -106,3 +106,59 @@ CREATE TABLE IF NOT EXISTS orders (
   created_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   updated_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
+
+-- Minimal per-conversation bookkeeping for the 4-stage nudge/follow-up
+-- system (Phase 10, src/jobs/nudges.js), PORTED (in spirit, not shape) from
+-- WhiteLabel_WA_System's conversations.json + per-phone timeline.jsonl.
+-- That source system tracked this in a JSON-file "conversations" object
+-- (paused/archived/needsHuman/status/lastClientTime/followup/contactName/
+-- businessName/messageCount) plus a separate append-only timeline.jsonl per
+-- phone for AI context. THIS REPO HAS NEITHER — no conversations table
+-- existed before this phase (src/brain/index.js's own header comment:
+-- "single-turn only ... no conversations table yet"). Stall-detection,
+-- per-stage dedupe, and a contextual nudge message all genuinely need SOME
+-- persisted per-conversation state, so this table is Phase 10's own
+-- dedicated addition — same "when a phase needs a bookkeeping table a
+-- literal task description implies reusing an existing/future table,
+-- prefer a dedicated table over overloading a shared polymorphic row shape"
+-- precedent PR10 (appointments) and PR11 (orders) already established.
+--
+-- Deliberately MINIMAL — not the general-purpose message-log subsystem the
+-- source's full conversations.json + timeline.jsonl pair implied. Only what
+-- stall-detection/dedupe/nudge-context actually needs:
+--   * last_client_message_at — the stall clock. Only a REAL inbound
+--     customer message resets it (never the bot's own reply).
+--   * recent_turns — a small BOUNDED JSON log of the last MAX_RECENT_TURNS
+--     (16) {role, content, ts} entries, both sides of the conversation —
+--     mirrors the source's timeline.jsonl slice(-16), capped the same way.
+--     Not a full messages table; this is nudge AI context only.
+--   * stage_N_sent_at — a REAL, persisted dedupe flag per follow-up stage,
+--     so a restart can never re-send a stage already sent (the source's
+--     equivalent, conv.followup.sent, lived only in the in-memory/JSON
+--     snapshot of a single scan cycle's read — this column is read fresh
+--     from disk on every scan instead).
+--   * contact_name / business_name — nullable; populated by a FUTURE phase
+--     that wires the already-existing [DATOS_CONTACTO] effect (see
+--     src/agent/effects/contact-data.js's own "FUTURE INJECTION POINT"
+--     comment, written in PR9) to upsert onto this row. Deliberately NOT
+--     wired in this phase — out of this phase's narrow scope.
+--
+-- Deliberately NOT built here (still out of scope, carried from PR9's Open
+-- Risks, untouched by PR10/PR11 either): conversation-level pause/archived/
+-- status/message-limit guards. This table exists for stall-detection/
+-- dedupe/context ONLY — nothing in this phase wires it into the
+-- webhook/brain call path as a guard, and app_config.bot_paused remains
+-- unwired.
+CREATE TABLE IF NOT EXISTS conversations (
+  customer_phone          TEXT PRIMARY KEY,
+  contact_name             TEXT,
+  business_name            TEXT,
+  last_client_message_at   TEXT,                              -- ISO; stall-detection clock
+  recent_turns             TEXT NOT NULL DEFAULT '[]',         -- JSON array, bounded to 16, [{role, content, ts}]
+  stage_1_sent_at          TEXT,
+  stage_2_sent_at          TEXT,
+  stage_3_sent_at          TEXT,
+  stage_4_sent_at          TEXT,
+  created_at               TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at               TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);

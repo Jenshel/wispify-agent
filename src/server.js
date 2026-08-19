@@ -8,6 +8,7 @@ const { getDb } = require('./db');
 const { createApp } = require('./app');
 const store = require('./config/store');
 const { startAppointmentReminderJob } = require('./jobs/appointment-reminders');
+const { startNudgeJob } = require('./jobs/nudges');
 
 const db = getDb();
 store.seedIntegrationsFromEnv(db);
@@ -25,3 +26,9 @@ app.listen(port, () => {
 // store.seedIntegrationsFromEnv() above never assuming anything is
 // configured yet).
 startAppointmentReminderJob(db);
+
+// Phase 10 (tasks.md 10.1) — periodic scan for stalled conversations; same
+// unconditional-at-boot precedent as the appointment reminder job above —
+// scanAndFollowup() no-ops internally until BOTH meta and gemini are
+// configured (Gemini-only, no OpenRouter fallback).
+startNudgeJob(db);

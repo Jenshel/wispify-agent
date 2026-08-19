@@ -12,7 +12,7 @@ const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
 
-const SCHEMA_VERSION = 4; // v4 adds orders (Phase 9, agent/effects/order.js + routes/payments.js)
+const SCHEMA_VERSION = 5; // v5 adds conversations (Phase 10, jobs/nudges.js stall-detection/dedupe/context)
 const SCHEMA_PATH = path.join(__dirname, 'schema.sql');
 
 const DEFAULT_DATA_DIR = path.join(__dirname, '..', '..', 'data');
