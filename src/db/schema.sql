@@ -39,3 +39,13 @@ INSERT OR IGNORE INTO integrations (id) VALUES ('meta');
 INSERT OR IGNORE INTO integrations (id) VALUES ('gemini');
 INSERT OR IGNORE INTO integrations (id) VALUES ('google_calendar');
 INSERT OR IGNORE INTO integrations (id) VALUES ('stripe');
+
+-- Single-admin session store (Phase 3, design.md "one admin_sessions table"
+-- replaces the old multi-tenant portal/partner session maps + OTP tables).
+-- token is the opaque session cookie value; expires_at is epoch ms for cheap
+-- comparison on every authenticated request.
+CREATE TABLE IF NOT EXISTS admin_sessions (
+  token       TEXT PRIMARY KEY,
+  expires_at  INTEGER NOT NULL,
+  created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
