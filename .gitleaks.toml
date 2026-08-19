@@ -1,0 +1,16 @@
+title = "Wispify Agent gitleaks config"
+
+[extend]
+useDefault = true
+
+# Test files intentionally contain fake, secret-shaped fixture values (e.g.
+# "sk_live_totallyRealSecretValue", "sk_test_FAKE") to exercise this repo's
+# own credential-encryption and credential-masking logic (src/config/secrets.js,
+# src/config/store.js) — the tests assert these values are never leaked in
+# plaintext anywhere. These are never real credentials. Real credentials only
+# ever live in a git-ignored .env or the encrypted DB, never in source.
+[allowlist]
+description = "Fake secret-shaped fixtures in test files"
+paths = [
+  '''test/.*\.test\.js$''',
+]
