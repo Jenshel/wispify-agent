@@ -125,7 +125,13 @@ function createSettingsRouter(
   });
 
   router.patch('/app-config', requireAuthMw, (req, res) => {
-    res.json(store.updateAppConfig(db, req.body || {}));
+    try {
+      return res.json(store.updateAppConfig(db, req.body || {}));
+    } catch (err) {
+      // store.updateAppConfig() throws only on the max-length guard (soul
+      // -docs/context/personalityCustom) — a clean 400, not a 500.
+      return res.status(400).json({ error: err.message });
+    }
   });
 
   // ── Google Calendar OAuth ────────────────────────────────────────────
