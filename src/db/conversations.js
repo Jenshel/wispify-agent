@@ -30,12 +30,25 @@ const STAGE_COLUMNS = {
 
 function toCamel(row) {
   if (!row) return null;
+  const lastClientMessageAt = row.last_client_message_at;
+  const lastReadAt = row.last_read_at;
+  // "Unread" is DERIVED, never a stored boolean (Phase 11, tasks.md 11.1) —
+  // a conversation is unread when the client's last message is newer than
+  // the last time an admin opened the thread (or the thread was never
+  // opened at all). Both timestamps are ISO-8601 UTC strings from the same
+  // `new Date().toISOString()` source, so plain string comparison is a
+  // valid, cheap chronological compare — no Date parsing needed.
+  const unread = !!lastClientMessageAt && (!lastReadAt || lastReadAt < lastClientMessageAt);
   return {
     customerPhone: row.customer_phone,
     contactName: row.contact_name,
     businessName: row.business_name,
-    lastClientMessageAt: row.last_client_message_at,
+    lastClientMessageAt,
     recentTurns: JSON.parse(row.recent_turns || '[]'),
+    pinned: !!row.pinned,
+    archived: !!row.archived,
+    lastReadAt,
+    unread,
     stageSentAt: {
       1: row.stage_1_sent_at,
       2: row.stage_2_sent_at,
@@ -55,11 +68,17 @@ function ensureConversation(db, customerPhone) {
   db.prepare('INSERT OR IGNORE INTO conversations (customer_phone) VALUES (?)').run(customerPhone);
 }
 
-function appendTurn(db, customerPhone, { role, content, now }) {
+function appendTurn(db, customerPhone, { role, content, now, mediaUrl, mediaType }) {
   ensureConversation(db, customerPhone);
   const row = db.prepare('SELECT recent_turns FROM conversations WHERE customer_phone = ?').get(customerPhone);
   const turns = JSON.parse(row?.recent_turns || '[]');
-  turns.push({ role, content, ts: now });
+  const entry = { role, content, ts: now };
+  // Optional, backward-compatible (Phase 11, tasks.md 11.2/gap 4): older
+  // entries simply don't have these keys — JSON.parse of a turn missing
+  // mediaUrl/mediaType still works fine, ChatView just renders text-only.
+  if (mediaUrl) entry.mediaUrl = mediaUrl;
+  if (mediaType) entry.mediaType = mediaType;
+  turns.push(entry);
   const bounded = turns.slice(-MAX_RECENT_TURNS);
   db.prepare(
     `UPDATE conversations SET recent_turns = @turns, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
@@ -77,13 +96,13 @@ function appendTurn(db, customerPhone, { role, content, now }) {
  * @param {string} customerPhone
  * @param {{text: string, now?: string}} [input]
  */
-function recordClientMessage(db, customerPhone, { text, now = new Date().toISOString() } = {}) {
+function recordClientMessage(db, customerPhone, { text, mediaUrl, mediaType, now = new Date().toISOString() } = {}) {
   ensureConversation(db, customerPhone);
   db.prepare('UPDATE conversations SET last_client_message_at = @now WHERE customer_phone = @phone').run({
     phone: customerPhone,
     now,
   });
-  appendTurn(db, customerPhone, { role: 'user', content: text || '', now });
+  appendTurn(db, customerPhone, { role: 'user', content: text || '', now, mediaUrl, mediaType });
   return getConversation(db, customerPhone);
 }
 
@@ -129,6 +148,61 @@ function markStageSent(db, customerPhone, stage, { now = new Date().toISOString(
   return getConversation(db, customerPhone);
 }
 
+// ── Phase 11 (tasks.md 11.1): panel-only bookkeeping ────────────────────
+// pinned/archived are panel organization only — NOT a bot guard (the
+// per-conversation pause/status/message-limit guards flagged in PR9-PR12
+// remain deliberately out of scope; only the GLOBAL app_config.bot_paused
+// flag is wired, in src/channels/whatsapp/webhook.js, not here).
+
+function setPinned(db, customerPhone, pinned) {
+  ensureConversation(db, customerPhone);
+  db.prepare(
+    `UPDATE conversations SET pinned = @pinned, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     WHERE customer_phone = @phone`
+  ).run({ phone: customerPhone, pinned: pinned ? 1 : 0 });
+  return getConversation(db, customerPhone);
+}
+
+function setArchived(db, customerPhone, archived) {
+  ensureConversation(db, customerPhone);
+  db.prepare(
+    `UPDATE conversations SET archived = @archived, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     WHERE customer_phone = @phone`
+  ).run({ phone: customerPhone, archived: archived ? 1 : 0 });
+  return getConversation(db, customerPhone);
+}
+
+/** Stamps last_read_at — the ONLY thing that clears the derived "unread" state (see toCamel()). */
+function markRead(db, customerPhone, { now = new Date().toISOString() } = {}) {
+  ensureConversation(db, customerPhone);
+  db.prepare(
+    `UPDATE conversations SET last_read_at = @now, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     WHERE customer_phone = @phone`
+  ).run({ phone: customerPhone, now });
+  return getConversation(db, customerPhone);
+}
+
+/**
+ * All conversations for the panel's ChatView list (tasks.md Phase 11.1) —
+ * unlike listConversationsWithActivity() above (the nudge scan's source,
+ * which requires a real client message), this includes every row so a
+ * conversation created by e.g. an unsupported-type inbound message still
+ * shows up. Sorted pinned-first, then most-recent activity
+ * (lastClientMessageAt, falling back to updatedAt) descending. Archived
+ * rows are excluded unless includeArchived is true.
+ */
+function listConversations(db, { includeArchived = false } = {}) {
+  const rows = db.prepare('SELECT * FROM conversations').all().map(toCamel);
+  const visible = includeArchived ? rows : rows.filter((c) => !c.archived);
+  visible.sort((a, b) => {
+    if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+    const aTime = a.lastClientMessageAt || a.updatedAt || '';
+    const bTime = b.lastClientMessageAt || b.updatedAt || '';
+    return bTime.localeCompare(aTime);
+  });
+  return visible;
+}
+
 module.exports = {
   MAX_RECENT_TURNS,
   getConversation,
@@ -136,4 +210,8 @@ module.exports = {
   recordBotMessage,
   listConversationsWithActivity,
   markStageSent,
+  setPinned,
+  setArchived,
+  markRead,
+  listConversations,
 };

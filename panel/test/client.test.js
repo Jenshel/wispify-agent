@@ -23,6 +23,9 @@ import {
   getAppConfig,
   updateAppConfig,
   GOOGLE_CALENDAR_OAUTH_START_URL,
+  listConversations,
+  getConversationDetail,
+  updateConversation,
 } from '../src/api/client.js';
 
 // ── buildRequestInit ───────────────────────────────────────────────────────
@@ -218,4 +221,48 @@ test('updateAppConfig(): PATCHes the given patch to /api/settings/app-config', a
 
 test('GOOGLE_CALENDAR_OAUTH_START_URL: points at the OAuth start route (full-page nav target, never fetched)', () => {
   assert.equal(GOOGLE_CALENDAR_OAUTH_START_URL, '/api/settings/google-calendar/oauth/start');
+});
+
+// ── Conversations (ChatView, Phase 11) ──────────────────────────────────
+
+test('listConversations(): GETs /api/conversations with no query by default', async () => {
+  const fetchImpl = async (url) => {
+    assert.equal(url, '/api/conversations');
+    return new Response(JSON.stringify([]), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  await listConversations(false, { fetchImpl });
+});
+
+test('listConversations(true): GETs /api/conversations?archived=1', async () => {
+  const fetchImpl = async (url) => {
+    assert.equal(url, '/api/conversations?archived=1');
+    return new Response(JSON.stringify([]), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  await listConversations(true, { fetchImpl });
+});
+
+test('getConversationDetail(): GETs /api/conversations/:phone, URL-encoded', async () => {
+  const fetchImpl = async (url) => {
+    assert.equal(url, '/api/conversations/%2B52%20155');
+    return new Response(JSON.stringify({ customerPhone: '+52 155' }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  };
+  await getConversationDetail('+52 155', { fetchImpl });
+});
+
+test('updateConversation(): PATCHes the given patch to /api/conversations/:phone', async () => {
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, init });
+    return new Response(JSON.stringify({ customerPhone: '5215500000001', pinned: true }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  };
+  await updateConversation('5215500000001', { pinned: true }, { fetchImpl });
+  assert.equal(calls[0].url, '/api/conversations/5215500000001');
+  assert.equal(calls[0].init.method, 'PATCH');
+  assert.deepEqual(JSON.parse(calls[0].init.body), { pinned: true });
 });

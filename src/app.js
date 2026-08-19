@@ -20,6 +20,7 @@ const { createPaymentsRouter } = require('./routes/payments');
 const createAuthRouter = require('./routes/auth');
 const createSettingsRouter = require('./routes/settings');
 const createFilesRouter = require('./routes/files');
+const createConversationsRouter = require('./routes/conversations');
 
 /**
  * @param {{
@@ -62,6 +63,7 @@ function createApp({
   app.use('/api/auth', createAuthRouter(db, { sessionTtlMs, loginRateLimit }));
   app.use('/api/settings', createSettingsRouter(db, { fetchImpl, verifyRateLimit, oauthStartRateLimit }));
   app.use('/api', createFilesRouter(db, { dataDir }));
+  app.use('/api', createConversationsRouter(db));
 
   return app;
 }
