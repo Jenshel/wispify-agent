@@ -4,11 +4,11 @@
 //
 // Module boundary (design.md): this file is the transport/channel layer
 // ONLY — HMAC verification, the Meta subscription handshake, and inbound
-// message parsing/media download. The AI brain call (Phase 6) and
-// control-tag parsing/effects (Phase 7) are explicitly OUT of scope here;
-// this file stops at processIncomingMessage(), a clearly-marked
-// integration seam Phase 6 replaces with a real src/brain/index.js
-// generateReply() call.
+// message parsing/media download. Control-tag parsing/effects (Phase 7)
+// are explicitly OUT of scope here; this file stops at
+// processIncomingMessage(), which now calls src/brain/index.js's
+// generateReply() directly (Phase 6) — a real, single-turn Gemini reply,
+// not the tag-effects pipeline Phase 7 still owns.
 //
 // Security posture (deliberate deviation from the source system, per the
 // delegated PR7 instructions): the source's routes/webhook.js gated HMAC
@@ -26,6 +26,7 @@ const crypto = require('crypto');
 const store = require('../../config/store');
 const client = require('./client');
 const mediaStore = require('../../media/store');
+const brain = require('../../brain');
 
 // ── Meta HMAC verify (threat-matrix a) ───────────────────────────────────
 // Ported verbatim from the source's verifyMetaSignature(): the
@@ -58,16 +59,13 @@ function timingSafeStringEqual(a, b) {
 }
 
 // ── Integration seam ──────────────────────────────────────────────────────
-// Phase 6 (src/brain/index.js generateReply()) REPLACES this stub with a
-// real Gemini call. Until then it deterministically echoes/acknowledges,
-// which is enough to exercise the transport + human-pacing layer this PR
-// actually delivers, end to end.
-async function processIncomingMessage(text, media) {
-  if (media) {
-    const kind = media.mimeType && media.mimeType.startsWith('audio') ? 'audio' : 'imagen';
-    return `He recibido tu ${kind}. (Respuesta de IA pendiente — Fase 6)`;
-  }
-  return `Recibido: "${text}"`;
+// Real AI reply generation (Phase 6) — replaces PR7's deterministic
+// echo/ack stub. `db` and `fetchImpl` are threaded through from
+// createWebhookRouter()'s own params (the injectable-fetch DI pattern used
+// throughout this repo); no parallel/duplicate reply path is built here —
+// this is the ONLY place that calls src/brain/index.js generateReply().
+async function processIncomingMessage(db, text, media, { fetchImpl } = {}) {
+  return brain.generateReply(db, { text, media }, { fetchImpl });
 }
 
 /**
@@ -200,7 +198,7 @@ function createWebhookRouter(
     // decides it's time (see client.sendPacedReply()).
     await client.markAsRead(creds, { messageId }, { fetchImpl });
 
-    const replyText = await processIncomingMessage(customerText, media);
+    const replyText = await processIncomingMessage(db, customerText, media, { fetchImpl });
 
     let sendResult = null;
     if (replyText) {

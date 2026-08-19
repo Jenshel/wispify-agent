@@ -245,7 +245,7 @@ test('POST /webhook rejects a request with no signature header at all — 401', 
   await server.close();
 });
 
-test('POST /webhook accepts a validly-signed text message, acks 200 immediately, and hands the text to the integration seam', async () => {
+test('POST /webhook accepts a validly-signed text message, acks 200 immediately, and hands the text to the integration seam (gemini not configured -> graceful fallback, never a crash)', async () => {
   let resolveProcessed;
   const processed = new Promise((resolve) => { resolveProcessed = resolve; });
   const server = await bootServer({ onMessageProcessed: (info) => resolveProcessed(info) });
@@ -258,12 +258,62 @@ test('POST /webhook accepts a validly-signed text message, acks 200 immediately,
 
   assert.equal(res.statusCode, 200);
 
-  const info = await withTimeout(processed, 2000, 'message processing');
-  assert.equal(info.from, '5215500000001');
-  assert.equal(info.customerText, 'Hola, quiero info');
-  assert.equal(info.type, 'text');
-  assert.match(info.replyText, /Hola, quiero info/); // stub echoes for now — Phase 6 replaces this
-  await server.close();
+  try {
+    const info = await withTimeout(processed, 2000, 'message processing');
+    assert.equal(info.from, '5215500000001');
+    assert.equal(info.customerText, 'Hola, quiero info');
+    assert.equal(info.type, 'text');
+    // This test only seeds `meta` credentials, not `gemini` — the brain's
+    // capability gate (Phase 6, src/brain/index.js) fails gracefully with a
+    // fallback string here, never throws or leaks the stub's old echo text.
+    assert.match(info.replyText, /no puedo responder automáticamente/);
+  } finally {
+    await server.close();
+  }
+});
+
+test('POST /webhook wires a real Gemini reply through when gemini is active + configured, and it reaches the customer via sendPacedReply', async () => {
+  let resolveProcessed;
+  const processed = new Promise((resolve) => { resolveProcessed = resolve; });
+  const geminiCalls = [];
+
+  const fetchImpl = async (url, opts) => {
+    if (url.includes('generativelanguage.googleapis.com')) {
+      geminiCalls.push({ url, opts });
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          candidates: [{ finishReason: 'STOP', content: { parts: [{ text: 'Claro, contame qué buscás.' }] } }],
+        }),
+      };
+    }
+    // markAsRead / sendText calls during pacing (Graph API)
+    return { ok: true, status: 200, json: async () => ({ messages: [{ id: 'wamid.fake' }] }) };
+  };
+
+  const server = await bootServer({ fetchImpl, onMessageProcessed: (info) => resolveProcessed(info) });
+  store.activateIntegration(server.db, 'gemini', {
+    credentials: { api_key: 'AIzaFAKE', model: 'gemini-2.5-flash' },
+    publicMeta: { model: 'gemini-2.5-flash' },
+  });
+  store.setIntegrationEnabled(server.db, 'gemini', true);
+
+  const payload = textMessagePayload({ text: 'Hola, quiero info' });
+  const bodyStr = JSON.stringify(payload);
+  const res = await httpPost(server, '/webhook', payload, {
+    headers: { 'x-hub-signature-256': sign(bodyStr) },
+  });
+  assert.equal(res.statusCode, 200);
+
+  try {
+    const info = await withTimeout(processed, 2000, 'message processing');
+    assert.equal(info.replyText, 'Claro, contame qué buscás.');
+    assert.equal(geminiCalls.length, 1);
+    assert.ok(info.sendResult, 'expected the real reply to be sent via sendPacedReply');
+  } finally {
+    await server.close();
+  }
 });
 
 test('POST /webhook ignores messages for a phone_number_id that does not match the configured one', async () => {
