@@ -6,6 +6,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { listIntegrations, getAppConfig, ApiError } from '../api/client.js';
 import IntegrationCard from './settings/IntegrationCard.jsx';
 import AppConfigSection from './settings/AppConfigSection.jsx';
+import SoulDocsSection from './settings/SoulDocsSection.jsx';
 import { INTEGRATION_ORDER } from './settings/integrationFields.js';
 
 export default function SettingsView({ username, onLogout }) {
@@ -89,6 +90,8 @@ export default function SettingsView({ username, onLogout }) {
         </section>
 
         <AppConfigSection appConfig={appConfig} onSaved={setAppConfig} />
+
+        <SoulDocsSection appConfig={appConfig} onSaved={setAppConfig} />
       </main>
     </div>
   );

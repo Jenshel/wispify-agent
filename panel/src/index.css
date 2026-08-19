@@ -319,3 +319,29 @@ select:focus {
   gap: 12px;
   align-items: end;
 }
+
+/* ── Soul docs / personality editor ───────────────────────────────── */
+
+.soul-docs-form {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 640px;
+}
+
+textarea {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.5;
+  outline: none;
+  resize: vertical;
+}
+
+textarea:focus {
+  border-color: var(--accent-green);
+}

@@ -29,6 +29,27 @@ const APP_CONFIG_FIELD_MAP = {
   botPaused: 'bot_paused',
 };
 
+// Free-text fields that flow straight into the future AI system prompt
+// (design.md buildSystemPrompt(business, catalog, soulDocs, capabilities);
+// mirrors the source system's config.context / config.personalityCustom /
+// soul-docs rules text). This is the OWNER's own bot config, not user input,
+// so no injection-style validation applies here — but an unbounded paste
+// must not be able to create a pathological DB row, so a generous max-length
+// guard is enforced before any write.
+const MAX_LONG_TEXT_LENGTH = 20_000;
+const LONG_TEXT_FIELDS = ['context', 'personalityCustom', 'soulDocs'];
+
+function assertAppConfigPatchWithinLimits(patch) {
+  for (const camel of LONG_TEXT_FIELDS) {
+    const value = patch[camel];
+    if (typeof value === 'string' && value.length > MAX_LONG_TEXT_LENGTH) {
+      throw new Error(
+        `${camel} exceeds maximum length of ${MAX_LONG_TEXT_LENGTH} characters (got ${value.length})`
+      );
+    }
+  }
+}
+
 function toCamelConfig(row) {
   return {
     businessName: row.business_name,
@@ -57,6 +78,7 @@ function getAppConfig(db) {
  * (see src/db/index.js header comment).
  */
 function updateAppConfig(db, patch) {
+  assertAppConfigPatchWithinLimits(patch);
   const current = db.prepare('SELECT * FROM app_config WHERE id = 1').get();
   const next = { ...current };
   for (const [camel, column] of Object.entries(APP_CONFIG_FIELD_MAP)) {
@@ -232,6 +254,7 @@ function seedIntegrationsFromEnv(db, env = process.env) {
 
 module.exports = {
   INTEGRATION_IDS,
+  MAX_LONG_TEXT_LENGTH,
   getAppConfig,
   updateAppConfig,
   getIntegrationRow,

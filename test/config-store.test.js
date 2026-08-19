@@ -53,6 +53,54 @@ test('updateAppConfig() coerces botPaused to a real boolean on read-back', () =>
   assert.equal(store.getAppConfig(db).botPaused, false);
 });
 
+// ── soul-docs / personality fields (Phase 4, PR6) ───────────────────────────
+// These are the free-text fields that feed the future prompt-builder
+// (design.md buildSystemPrompt(business, catalog, soulDocs, capabilities);
+// see wa-brain-local's buildSystemPrompt() in the source system for the
+// real field names this mirrors: context, personalityCustom, and the
+// soul-docs rules text). No external validation is possible or needed here
+// (it's the owner's own bot config, not user input) — only a max-length
+// guard against a runaway paste creating a pathological DB row.
+
+test('updateAppConfig() persists context/personality/personalityCustom/soulDocs and reflects them immediately on read-back (no caching)', () => {
+  const db = freshDb();
+  store.updateAppConfig(db, {
+    context: 'We sell keratin treatments and haircuts.',
+    personality: 'amigable',
+    personalityCustom: 'Warm, concise, uses emojis sparingly.',
+    soulDocs: 'Never discount below cost. Escalate refund requests to a human.',
+  });
+  const config = store.getAppConfig(db);
+  assert.equal(config.context, 'We sell keratin treatments and haircuts.');
+  assert.equal(config.personality, 'amigable');
+  assert.equal(config.personalityCustom, 'Warm, concise, uses emojis sparingly.');
+  assert.equal(config.soulDocs, 'Never discount below cost. Escalate refund requests to a human.');
+});
+
+test('updateAppConfig() preserves newlines/formatting in long free-text fields verbatim', () => {
+  const db = freshDb();
+  const multiline = 'Rule 1: be polite.\nRule 2: never promise a discount.\n\nEscalation:\n- refunds\n- complaints';
+  store.updateAppConfig(db, { soulDocs: multiline });
+  assert.equal(store.getAppConfig(db).soulDocs, multiline);
+});
+
+test('updateAppConfig() rejects a soulDocs/context/personalityCustom value over the max-length guard, without persisting it', () => {
+  const db = freshDb();
+  const oversized = 'x'.repeat(20_001);
+  assert.throws(() => store.updateAppConfig(db, { soulDocs: oversized }), /soulDocs/);
+  assert.equal(store.getAppConfig(db).soulDocs, null);
+
+  assert.throws(() => store.updateAppConfig(db, { context: oversized }), /context/);
+  assert.throws(() => store.updateAppConfig(db, { personalityCustom: oversized }), /personalityCustom/);
+});
+
+test('updateAppConfig() accepts a long-text field exactly at the max-length guard', () => {
+  const db = freshDb();
+  const atLimit = 'y'.repeat(20_000);
+  store.updateAppConfig(db, { soulDocs: atLimit });
+  assert.equal(store.getAppConfig(db).soulDocs, atLimit);
+});
+
 // ── integrations: activation / errors / enable ──────────────────────────────
 
 test('activateIntegration() seals credentials and flips status to active', () => {

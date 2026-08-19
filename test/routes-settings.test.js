@@ -231,6 +231,58 @@ test('PATCH /api/settings/app-config — persists a partial patch', async () => 
   await server.close();
 });
 
+// ── soul-docs / personality (Phase 4, PR6) — folded into the existing
+// GET/PATCH /api/settings/app-config endpoints, since context/personality/
+// personalityCustom/soulDocs were already columns (PR2's schema) and already
+// in store.js's field allowlist. This is pure CRUD, no external provider
+// call: apply-live means the DB write is visible on the very next read. ────
+
+test('PATCH /api/settings/app-config — persists context/personality/personalityCustom/soulDocs, visible on the very next GET (apply-live, no restart)', async () => {
+  const server = await bootServer();
+  const cookie = await loginAndGetCookie(server);
+  const res = await httpPatch(
+    server,
+    '/api/settings/app-config',
+    {
+      context: 'We sell keratin treatments.',
+      personality: 'amigable',
+      personalityCustom: 'Warm, concise, uses emojis sparingly.',
+      soulDocs: 'Never discount below cost.',
+    },
+    { headers: { Cookie: `session=${cookie}` } }
+  );
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json.context, 'We sell keratin treatments.');
+  assert.equal(res.json.personality, 'amigable');
+  assert.equal(res.json.personalityCustom, 'Warm, concise, uses emojis sparingly.');
+  assert.equal(res.json.soulDocs, 'Never discount below cost.');
+
+  // No caching layer between a save and the next read — this is the DB-level
+  // guarantee Phase 6's future prompt-builder depends on to reflect edits on
+  // the very next bot reply without a restart.
+  const reread = await httpGet(server, '/api/settings/app-config', { headers: { Cookie: `session=${cookie}` } });
+  assert.equal(reread.json.soulDocs, 'Never discount below cost.');
+  await server.close();
+});
+
+test('PATCH /api/settings/app-config — rejects an oversized soulDocs value with 400 and does not persist it', async () => {
+  const server = await bootServer();
+  const cookie = await loginAndGetCookie(server);
+  const oversized = 'x'.repeat(20_001);
+  const res = await httpPatch(
+    server,
+    '/api/settings/app-config',
+    { soulDocs: oversized },
+    { headers: { Cookie: `session=${cookie}` } }
+  );
+  assert.equal(res.statusCode, 400);
+  assert.ok(res.json.error);
+
+  const reread = await httpGet(server, '/api/settings/app-config', { headers: { Cookie: `session=${cookie}` } });
+  assert.equal(reread.json.soulDocs, null);
+  await server.close();
+});
+
 // ── Google Calendar OAuth ────────────────────────────────────────────────
 
 test('GET /api/settings/google-calendar/oauth/start — 401 without a session', async () => {
