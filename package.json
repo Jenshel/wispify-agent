@@ -1,0 +1,26 @@
+{
+  "name": "wispify-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Single-tenant WhatsApp AI agent starter: Meta Cloud API + Google Gemini, with optional Google Calendar booking and Stripe checkout, configured through a guided admin setup screen.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Jenshel/wispify-agent.git"
+  },
+  "keywords": [
+    "whatsapp",
+    "gemini",
+    "ai-agent",
+    "chatbot"
+  ],
+  "author": "Wispify",
+  "dependencies": {},
+  "devDependencies": {}
+}
