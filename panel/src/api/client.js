@@ -79,3 +79,11 @@ export const updateAppConfig = (patchBody, opts) => patch('/api/settings/app-con
 // (or an <a href>) to this constant on click. ─────────────────────────────
 
 export const GOOGLE_CALENDAR_OAUTH_START_URL = '/api/settings/google-calendar/oauth/start';
+
+// ── Conversations: ChatView (src/routes/conversations.js, Phase 11) ────
+
+export const listConversations = (includeArchived, opts) =>
+  get(`/api/conversations${includeArchived ? '?archived=1' : ''}`, opts);
+export const getConversationDetail = (phone, opts) => get(`/api/conversations/${encodeURIComponent(phone)}`, opts);
+export const updateConversation = (phone, patchBody, opts) =>
+  patch(`/api/conversations/${encodeURIComponent(phone)}`, patchBody, opts);

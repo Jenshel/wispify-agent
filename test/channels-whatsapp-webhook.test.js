@@ -716,6 +716,147 @@ test('POST /webhook resets the stall-detection clock for an unsupported message 
   await server.close();
 });
 
+// ── Phase 11 (tasks.md 11.1, gap #3): app_config.bot_paused global gate ──
+
+test('POST /webhook — when bot_paused is true, records the message + marks read but sends NO reply', async () => {
+  const conversationsDb = require('../src/db/conversations');
+  const calls = [];
+  const fetchImpl = async (url, opts) => {
+    calls.push({ url, body: opts && opts.body ? JSON.parse(opts.body) : null });
+    return { ok: true, status: 200, json: async () => ({ messages: [{ id: 'wamid.fake' }] }) };
+  };
+
+  let resolveProcessed;
+  const processed = new Promise((resolve) => { resolveProcessed = resolve; });
+  const server = await bootServer({ fetchImpl, onMessageProcessed: (info) => resolveProcessed(info) });
+  store.updateAppConfig(server.db, { botPaused: true });
+
+  const payload = textMessagePayload({ from: '5215500000010', text: 'Hola, sigues ahi?' });
+  const bodyStr = JSON.stringify(payload);
+  const res = await httpPost(server, '/webhook', payload, { headers: { 'x-hub-signature-256': sign(bodyStr) } });
+  assert.equal(res.statusCode, 200);
+
+  try {
+    const info = await withTimeout(processed, 2000, 'paused message processing');
+    assert.equal(info.replyText, null, 'no reply should be generated while paused');
+    assert.equal(info.paused, true);
+
+    // The stall clock / thread history must keep working even while paused.
+    const conv = conversationsDb.getConversation(server.db, '5215500000010');
+    assert.ok(conv, 'expected the conversations row to still be recorded while paused');
+    assert.ok(conv.lastClientMessageAt);
+    assert.equal(conv.recentTurns.length, 1);
+    assert.equal(conv.recentTurns[0].role, 'user');
+
+    // markAsRead (status:'read') is allowed; an actual outbound reply
+    // (type:'text') must NEVER happen while paused.
+    const readCalls = calls.filter((c) => c.body && c.body.status === 'read');
+    const sendCalls = calls.filter((c) => c.body && c.body.type === 'text');
+    assert.ok(readCalls.length >= 1, 'expected a markAsRead call even while paused');
+    assert.equal(sendCalls.length, 0, 'expected NO outbound text send while bot is paused');
+  } finally {
+    await server.close();
+  }
+});
+
+test('POST /webhook — bot_paused is read FRESH on every message, no caching (apply live, no restart)', async () => {
+  const calls = [];
+  const fetchImpl = async (url, opts) => {
+    calls.push({ url, body: opts && opts.body ? JSON.parse(opts.body) : null });
+    return { ok: true, status: 200, json: async () => ({ messages: [{ id: 'wamid.fake' }] }) };
+  };
+
+  let resolveFirst, resolveSecond;
+  const first = new Promise((resolve) => { resolveFirst = resolve; });
+  let onProcessed = (info) => resolveFirst(info);
+  const server = await bootServer({ fetchImpl, onMessageProcessed: (info) => onProcessed(info) });
+  try {
+    store.updateAppConfig(server.db, { botPaused: true });
+
+    const payload1 = textMessagePayload({ from: '5215500000011', text: 'primero', messageId: 'wamid.P1' });
+    const bodyStr1 = JSON.stringify(payload1);
+    await httpPost(server, '/webhook', payload1, { headers: { 'x-hub-signature-256': sign(bodyStr1) } });
+    const info1 = await withTimeout(first, 2000, 'first (paused) message');
+    assert.equal(info1.paused, true);
+
+    // Unpause — the very next message must get a real (fallback, since gemini
+    // isn't configured in this test) reply, no restart/cache involved.
+    store.updateAppConfig(server.db, { botPaused: false });
+    const second = new Promise((resolve) => { resolveSecond = resolve; });
+    onProcessed = (info) => resolveSecond(info);
+
+    const payload2 = textMessagePayload({ from: '5215500000011', text: 'segundo', messageId: 'wamid.P2' });
+    const bodyStr2 = JSON.stringify(payload2);
+    await httpPost(server, '/webhook', payload2, { headers: { 'x-hub-signature-256': sign(bodyStr2) } });
+    const info2 = await withTimeout(second, 2000, 'second (unpaused) message');
+    assert.notEqual(info2.paused, true);
+    assert.ok(info2.replyText);
+  } finally {
+    await server.close();
+  }
+});
+
+// ── Phase 11 (tasks.md 11.2, gap #4): mediaUrl/mediaType reach the conversations turn ──
+
+test('POST /webhook — an inbound image message stores mediaUrl + mediaType on the conversations turn (ChatView media rendering)', async () => {
+  const conversationsDb = require('../src/db/conversations');
+  let resolveProcessed;
+  const processed = new Promise((resolve) => { resolveProcessed = resolve; });
+  const dataDir = tmpDataDir();
+
+  const fetchImpl = async (url) => {
+    if (url.includes('/MEDIA_ID_9')) {
+      return { ok: true, status: 200, json: async () => ({ url: 'https://lookaside.fbsbx.com/media/img9' }) };
+    }
+    if (url === 'https://lookaside.fbsbx.com/media/img9') {
+      return { ok: true, status: 200, arrayBuffer: async () => new TextEncoder().encode('fake-jpeg-bytes').buffer };
+    }
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+
+  const server = await bootServer({ fetchImpl, dataDir, onMessageProcessed: (info) => resolveProcessed(info) });
+
+  const payload = {
+    object: 'whatsapp_business_account',
+    entry: [
+      {
+        id: 'WABA_ID',
+        changes: [
+          {
+            field: 'messages',
+            value: {
+              metadata: { phone_number_id: '999888777' },
+              messages: [
+                {
+                  from: '5215500000012',
+                  id: 'wamid.IMG9',
+                  type: 'image',
+                  image: { id: 'MEDIA_ID_9', mime_type: 'image/jpeg', caption: '' },
+                },
+              ],
+            },
+          },
+        ],
+      },
+    ],
+  };
+  const bodyStr = JSON.stringify(payload);
+  try {
+    const res = await httpPost(server, '/webhook', payload, { headers: { 'x-hub-signature-256': sign(bodyStr) } });
+    assert.equal(res.statusCode, 200);
+
+    await withTimeout(processed, 2000, 'media message processing');
+
+    const conv = conversationsDb.getConversation(server.db, '5215500000012');
+    assert.ok(conv);
+    assert.equal(conv.recentTurns[0].role, 'user');
+    assert.match(conv.recentTurns[0].mediaUrl, /^\/api\/media\/client\/5215500000012\/\d+\.jpeg$/);
+    assert.equal(conv.recentTurns[0].mediaType, 'image/jpeg');
+  } finally {
+    await server.close();
+  }
+});
+
 test('POST /webhook does not crash on an unparseable JSON body even after a valid signature', async () => {
   const server = await bootServer();
   const bodyStr = 'not-json{{{';

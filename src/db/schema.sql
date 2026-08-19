@@ -143,22 +143,37 @@ CREATE TABLE IF NOT EXISTS orders (
 --     comment, written in PR9) to upsert onto this row. Deliberately NOT
 --     wired in this phase — out of this phase's narrow scope.
 --
--- Deliberately NOT built here (still out of scope, carried from PR9's Open
--- Risks, untouched by PR10/PR11 either): conversation-level pause/archived/
--- status/message-limit guards. This table exists for stall-detection/
--- dedupe/context ONLY — nothing in this phase wires it into the
--- webhook/brain call path as a guard, and app_config.bot_paused remains
--- unwired.
+-- Conversation-level pause/archived/status/message-limit guards were flagged
+-- as still out of scope through PR9-PR12 — Phase 11 (panel ChatView, this
+-- PR) is the first to pick part of that up: `pinned`/`archived` (panel
+-- organization only, not a bot guard) and `last_read_at` (derives "unread"
+-- for the panel — deliberately NOT a redundant stored boolean, computed as
+-- last_client_message_at > last_read_at in src/db/conversations.js's
+-- toCamel(), so it can never drift from the two source-of-truth timestamps).
+-- The GLOBAL app_config.bot_paused flag is wired in THIS phase too (see
+-- src/channels/whatsapp/webhook.js) — but per-conversation status/
+-- message-limit guards remain genuinely out of scope, unclaimed.
+--
+-- Schema-version note (v6): this is the first phase to add COLUMNS to a
+-- table that already shipped in an earlier version (v5). CREATE TABLE IF
+-- NOT EXISTS below only helps a brand-new database — on an already-migrated
+-- v5 database it is a silent no-op, so src/db/index.js's migrate() also
+-- runs a small idempotent ALTER TABLE ADD COLUMN step (checked against the
+-- live column list first) to bring an existing installation's `conversations`
+-- table up to the v6 shape. See that file's own comment for why.
 CREATE TABLE IF NOT EXISTS conversations (
   customer_phone          TEXT PRIMARY KEY,
   contact_name             TEXT,
   business_name            TEXT,
   last_client_message_at   TEXT,                              -- ISO; stall-detection clock
-  recent_turns             TEXT NOT NULL DEFAULT '[]',         -- JSON array, bounded to 16, [{role, content, ts}]
+  recent_turns             TEXT NOT NULL DEFAULT '[]',         -- JSON array, bounded to 16, [{role, content, ts, mediaUrl?, mediaType?}]
   stage_1_sent_at          TEXT,
   stage_2_sent_at          TEXT,
   stage_3_sent_at          TEXT,
   stage_4_sent_at          TEXT,
+  pinned                   INTEGER NOT NULL DEFAULT 0,         -- panel: pinned-first sort (Phase 11.1)
+  archived                 INTEGER NOT NULL DEFAULT 0,         -- panel: hidden from the default list (Phase 11.1)
+  last_read_at             TEXT,                               -- panel: "unread" = last_client_message_at > last_read_at
   created_at               TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   updated_at               TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );

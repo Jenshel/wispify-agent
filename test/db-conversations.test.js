@@ -113,3 +113,95 @@ test('listConversationsWithActivity() only returns conversations that have at le
   assert.equal(active.length, 1);
   assert.equal(active[0].customerPhone, '5215500000001');
 });
+
+// ── Phase 11 (tasks.md 11.1): pinned/archived/unread + panel list ─────────
+
+test('a brand new conversation is pinned:false, archived:false, unread:false (no client message yet)', () => {
+  const db = freshDb();
+  const conv = conversations.recordBotMessage(db, '5215500000020', { text: 'hola', now: '2030-01-15T10:00:00.000Z' });
+  assert.equal(conv.pinned, false);
+  assert.equal(conv.archived, false);
+  assert.equal(conv.unread, false);
+  assert.equal(conv.lastReadAt, null);
+});
+
+test('a conversation is unread as soon as a client message arrives and no read has been recorded yet', () => {
+  const db = freshDb();
+  const conv = conversations.recordClientMessage(db, '5215500000001', { text: 'Hola', now: '2030-01-15T10:00:00.000Z' });
+  assert.equal(conv.unread, true);
+});
+
+test('markRead() clears unread — unread is derived from last_read_at vs last_client_message_at, not a stored flag', () => {
+  const db = freshDb();
+  conversations.recordClientMessage(db, '5215500000001', { text: 'Hola', now: '2030-01-15T10:00:00.000Z' });
+  const read = conversations.markRead(db, '5215500000001', { now: '2030-01-15T10:05:00.000Z' });
+  assert.equal(read.unread, false);
+  assert.equal(read.lastReadAt, '2030-01-15T10:05:00.000Z');
+
+  // A NEW client message after the read must flip it back to unread.
+  const again = conversations.recordClientMessage(db, '5215500000001', { text: 'sigues ahi?', now: '2030-01-15T10:10:00.000Z' });
+  assert.equal(again.unread, true);
+});
+
+test('setPinned() toggles pinned and persists', () => {
+  const db = freshDb();
+  conversations.recordClientMessage(db, '5215500000001', { text: 'Hola', now: '2030-01-15T10:00:00.000Z' });
+  const pinned = conversations.setPinned(db, '5215500000001', true);
+  assert.equal(pinned.pinned, true);
+  const reread = conversations.getConversation(db, '5215500000001');
+  assert.equal(reread.pinned, true);
+  const unpinned = conversations.setPinned(db, '5215500000001', false);
+  assert.equal(unpinned.pinned, false);
+});
+
+test('setArchived() toggles archived and persists', () => {
+  const db = freshDb();
+  conversations.recordClientMessage(db, '5215500000001', { text: 'Hola', now: '2030-01-15T10:00:00.000Z' });
+  const archived = conversations.setArchived(db, '5215500000001', true);
+  assert.equal(archived.archived, true);
+  const reread = conversations.getConversation(db, '5215500000001');
+  assert.equal(reread.archived, true);
+});
+
+test('recordClientMessage() optionally carries mediaUrl/mediaType through onto the recorded turn', () => {
+  const db = freshDb();
+  const conv = conversations.recordClientMessage(db, '5215500000001', {
+    text: '[El cliente envió una imagen]',
+    mediaUrl: '/api/media/client/5215500000001/123.jpeg',
+    mediaType: 'image/jpeg',
+    now: '2030-01-15T10:00:00.000Z',
+  });
+  assert.equal(conv.recentTurns[0].mediaUrl, '/api/media/client/5215500000001/123.jpeg');
+  assert.equal(conv.recentTurns[0].mediaType, 'image/jpeg');
+});
+
+test('recordClientMessage() without mediaUrl/mediaType still works — old-shape turns remain backward-compatible', () => {
+  const db = freshDb();
+  const conv = conversations.recordClientMessage(db, '5215500000001', { text: 'Hola', now: '2030-01-15T10:00:00.000Z' });
+  assert.equal(conv.recentTurns[0].mediaUrl, undefined);
+  assert.equal(conv.recentTurns[0].mediaType, undefined);
+});
+
+test('listConversations() sorts pinned-first, then most-recent client activity, excludes archived by default', () => {
+  const db = freshDb();
+  conversations.recordClientMessage(db, '5215500000001', { text: 'a', now: '2030-01-15T10:00:00.000Z' });
+  conversations.recordClientMessage(db, '5215500000002', { text: 'b', now: '2030-01-15T11:00:00.000Z' });
+  conversations.recordClientMessage(db, '5215500000003', { text: 'c', now: '2030-01-15T09:00:00.000Z' });
+  conversations.setPinned(db, '5215500000003', true);
+  conversations.setArchived(db, '5215500000002', true);
+
+  const list = conversations.listConversations(db);
+  // 5215500000003 is pinned -> first, even though its activity is oldest.
+  // 5215500000002 is archived -> excluded by default.
+  // 5215500000001 is the only remaining unpinned one -> second.
+  assert.deepEqual(list.map((c) => c.customerPhone), ['5215500000003', '5215500000001']);
+});
+
+test('listConversations({includeArchived: true}) includes archived rows', () => {
+  const db = freshDb();
+  conversations.recordClientMessage(db, '5215500000001', { text: 'a', now: '2030-01-15T10:00:00.000Z' });
+  conversations.setArchived(db, '5215500000001', true);
+
+  assert.equal(conversations.listConversations(db).length, 0);
+  assert.equal(conversations.listConversations(db, { includeArchived: true }).length, 1);
+});

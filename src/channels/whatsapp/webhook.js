@@ -222,11 +222,51 @@ function createWebhookRouter(
     // clock + bounded recent-turns context log. Real DB write, not
     // in-memory state — the nudge job's dedupe/stall check reads this
     // fresh on every scan.
-    conversations.recordClientMessage(db, from, { text: customerText });
+    //
+    // Phase 11 (tasks.md 11.2, gap #4): pass the mediaUrl this handler
+    // already computed for image/audio messages through onto the recorded
+    // turn, so the panel's ChatView thread view has something to point an
+    // <img>/<audio> tag at (src/db/conversations.js's turn shape carries
+    // these as OPTIONAL fields — old entries without them still parse fine).
+    conversations.recordClientMessage(db, from, {
+      text: customerText,
+      mediaUrl: mediaUrl || undefined,
+      mediaType: media ? media.mimeType : undefined,
+    });
 
     // Read receipt only — typing dots kick in later, once the pacing
     // decides it's time (see client.sendPacedReply()).
     await client.markAsRead(creds, { messageId }, { fetchImpl });
+
+    // Phase 11 (tasks.md 11.1, gap #3): app_config.bot_paused is a GLOBAL
+    // pause flag (schema since Phase 1) that was set-able via the settings
+    // route since PR4 but READ NOWHERE — flagged as still-unwired in every
+    // prior phase's Open Risks (PR9-PR12). Wired here now: read FRESH on
+    // every message (no caching), same "apply live, no restart" guarantee
+    // soul-docs edits already have (PR8's src/brain/index.js) — flipping
+    // the panel's toggle affects the very next inbound message. The
+    // conversations write + read receipt above still happen while paused
+    // (an admin reviewing the panel needs to see what the customer said,
+    // and the stall clock must keep ticking) — only reply
+    // generation/sending is skipped.
+    const appConfig = store.getAppConfig(db);
+    if (appConfig.botPaused) {
+      console.log(`[WEBHOOK] bot is paused — message from ${from} recorded, no reply generated`);
+      if (typeof onMessageProcessed === 'function') {
+        onMessageProcessed({
+          from,
+          messageId,
+          type,
+          customerText,
+          media: media ? { mimeType: media.mimeType } : null,
+          mediaUrl,
+          replyText: null,
+          sendResult: null,
+          paused: true,
+        });
+      }
+      return;
+    }
 
     const replyText = await processIncomingMessage(db, from, customerText, media, { fetchImpl });
 
@@ -257,6 +297,7 @@ function createWebhookRouter(
         mediaUrl,
         replyText,
         sendResult,
+        paused: false,
       });
     }
   }

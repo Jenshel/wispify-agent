@@ -2,6 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const Database = require('better-sqlite3');
 
 const { openDatabase, migrate, SCHEMA_VERSION } = require('../src/db');
 
@@ -44,6 +45,48 @@ test('migration sets PRAGMA user_version to SCHEMA_VERSION', () => {
   const db = openDatabase(':memory:');
   const version = db.pragma('user_version', { simple: true });
   assert.equal(version, SCHEMA_VERSION);
+});
+
+test('a fresh database has the v6 conversations columns (pinned/archived/last_read_at)', () => {
+  const db = openDatabase(':memory:');
+  const cols = db.prepare('PRAGMA table_info(conversations)').all().map((c) => c.name);
+  assert.ok(cols.includes('pinned'));
+  assert.ok(cols.includes('archived'));
+  assert.ok(cols.includes('last_read_at'));
+});
+
+test('migrate() adds pinned/archived/last_read_at to an existing v5-shape conversations table without losing data', () => {
+  // Hand-build a v5-shape database (schema BEFORE this PR's column
+  // additions) to prove an already-migrated install gets the new columns
+  // via migrate(), not just a brand-new database — this is the real bug
+  // src/db/index.js's applyColumnMigrations() fixes (schema.sql's own
+  // `CREATE TABLE IF NOT EXISTS` is a silent no-op here).
+  const db = new Database(':memory:');
+  db.exec(`
+    CREATE TABLE app_config (id INTEGER PRIMARY KEY CHECK (id = 1));
+    INSERT INTO app_config (id) VALUES (1);
+    CREATE TABLE conversations (
+      customer_phone TEXT PRIMARY KEY,
+      contact_name TEXT,
+      business_name TEXT,
+      last_client_message_at TEXT,
+      recent_turns TEXT NOT NULL DEFAULT '[]',
+      stage_1_sent_at TEXT, stage_2_sent_at TEXT, stage_3_sent_at TEXT, stage_4_sent_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+      updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    );
+    INSERT INTO conversations (customer_phone, last_client_message_at) VALUES ('5215500000001', '2030-01-01T00:00:00.000Z');
+  `);
+  db.pragma('user_version = 5');
+
+  migrate(db);
+
+  assert.equal(db.pragma('user_version', { simple: true }), SCHEMA_VERSION);
+  const row = db.prepare('SELECT * FROM conversations WHERE customer_phone = ?').get('5215500000001');
+  assert.equal(row.last_client_message_at, '2030-01-01T00:00:00.000Z', 'existing data must survive the migration');
+  assert.equal(row.pinned, 0);
+  assert.equal(row.archived, 0);
+  assert.equal(row.last_read_at, null);
 });
 
 test('two independent in-memory databases are isolated from each other', () => {
