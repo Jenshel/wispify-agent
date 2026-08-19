@@ -7,6 +7,7 @@
 const { getDb } = require('./db');
 const { createApp } = require('./app');
 const store = require('./config/store');
+const { startAppointmentReminderJob } = require('./jobs/appointment-reminders');
 
 const db = getDb();
 store.seedIntegrationsFromEnv(db);
@@ -17,3 +18,10 @@ const port = Number(process.env.PORT) || 3000;
 app.listen(port, () => {
   console.log(`wispify-agent listening on :${port}`);
 });
+
+// Phase 8 (tasks.md 8.4) — periodic scan for upcoming appointments; no-ops
+// internally on every scan until Meta credentials are configured, so it is
+// always safe to start unconditionally at boot (same precedent as
+// store.seedIntegrationsFromEnv() above never assuming anything is
+// configured yet).
+startAppointmentReminderJob(db);

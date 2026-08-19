@@ -376,6 +376,94 @@ test('POST /webhook — full round trip: a Gemini reply containing control tags 
   }
 });
 
+test('POST /webhook — full round trip: a Gemini reply containing [CITA_CONFIRMADA] books a real Calendar event and confirms the customer tag-free (Phase 8 runtime harness, substitutes for a live Meta test-number send)', async () => {
+  let resolveProcessed;
+  const processed = new Promise((resolve) => { resolveProcessed = resolve; });
+  const graphCalls = [];
+  const calendarCalls = [];
+
+  const fetchImpl = async (url, opts) => {
+    if (url.includes('generativelanguage.googleapis.com')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          candidates: [{
+            finishReason: 'STOP',
+            content: {
+              parts: [{
+                text:
+                  '¡Listo! Te confirmo tu cita.\n' +
+                  '[CITA_CONFIRMADA]\n' +
+                  'Servicio: Corte\n' +
+                  'Fecha: 2030-01-15\n' +
+                  'Hora: 15:00\n' +
+                  'Duracion: 30\n' +
+                  'Pago: al llegar\n' +
+                  'Total: 200\n' +
+                  '[/CITA_CONFIRMADA]',
+              }],
+            },
+          }],
+        }),
+      };
+    }
+    if (url.includes('oauth2.googleapis.com/token')) {
+      return { ok: true, status: 200, json: async () => ({ access_token: 'ya29.fake', expires_in: 3600 }) };
+    }
+    if (url.includes('calendar/v3')) {
+      calendarCalls.push({ url, opts });
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ id: 'evt_fake', htmlLink: 'https://calendar.google.com/x', hangoutLink: 'https://meet.google.com/fake' }),
+      };
+    }
+    graphCalls.push({ url, opts });
+    return { ok: true, status: 200, json: async () => ({ messages: [{ id: 'wamid.fake' }] }) };
+  };
+
+  const server = await bootServer({ fetchImpl, onMessageProcessed: (info) => resolveProcessed(info) });
+  store.activateIntegration(server.db, 'gemini', {
+    credentials: { api_key: 'AIzaFAKE', model: 'gemini-2.5-flash' },
+    publicMeta: { model: 'gemini-2.5-flash' },
+  });
+  store.setIntegrationEnabled(server.db, 'gemini', true);
+  store.activateIntegration(server.db, 'google_calendar', {
+    credentials: { access_token: 'ya29.fake', refresh_token: '1//fake' },
+    publicMeta: { calendar_id: 'demo@business.example.com' },
+  });
+  store.setIntegrationEnabled(server.db, 'google_calendar', true);
+
+  const payload = textMessagePayload({ text: 'Quiero agendar un corte el 15 de enero de 2030 a las 3pm' });
+  const bodyStr = JSON.stringify(payload);
+  const res = await httpPost(server, '/webhook', payload, { headers: { 'x-hub-signature-256': sign(bodyStr) } });
+  assert.equal(res.statusCode, 200);
+
+  try {
+    const info = await withTimeout(processed, 2000, 'message processing');
+    // Customer-visible reply is tag-free — the guarantee this whole phase exists for.
+    assert.doesNotMatch(info.replyText, /\[/);
+    assert.match(info.replyText, /Listo! Te confirmo tu cita\./);
+
+    // A real Calendar event was created via the OAuth token machinery.
+    assert.equal(calendarCalls.length >= 1, true);
+
+    // The customer received a real confirmation message with the Meet link.
+    const confirmCall = graphCalls.find((c) => {
+      try {
+        const body = JSON.parse(c.opts.body);
+        return body.to === '5215500000001' && /meet\.google\.com\/fake/.test(body.text?.body || '');
+      } catch {
+        return false;
+      }
+    });
+    assert.ok(confirmCall, 'expected a WhatsApp confirmation to the customer with the Meet link');
+  } finally {
+    await server.close();
+  }
+});
+
 test('POST /webhook ignores messages for a phone_number_id that does not match the configured one', async () => {
   let called = false;
   const server = await bootServer({ onMessageProcessed: () => { called = true; } });
