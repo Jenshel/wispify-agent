@@ -43,9 +43,12 @@
 //
 // Deliberately NOT built here (out of scope, carried from PR9's Open
 // Risks): conversation-level pause/archived/status/message-limit guards.
-// app_config.bot_paused remains unwired to this job (a stalled but paused
-// conversation would still get nudged — same open gap the webhook/brain
-// call path already has).
+// app_config.bot_paused IS wired here (PR13 follow-up fix — the webhook
+// path's own gap was closed in this same PR, and this job would otherwise
+// have been the one remaining place that ignored the pause flag). This
+// repo has a single GLOBAL bot_paused flag, not a per-conversation one, so
+// the whole scan pass is skipped while paused rather than gating
+// per-conversation — see scanAndFollowup() below for the early-return.
 
 const store = require('../config/store');
 const client = require('../channels/whatsapp/client');
@@ -269,6 +272,13 @@ async function scanAndFollowup(db, { fetchImpl, now = Date.now() } = {}) {
 
   const geminiCreds = store.getIntegrationCredentials(db, 'gemini');
   if (!geminiCreds || !geminiCreds.api_key || !geminiCreds.model) return; // Gemini-only — no OpenRouter fallback
+
+  // PR13 follow-up fix: read app_config.bot_paused FRESH on every scan (same
+  // "no caching, apply live" discipline webhook.js's own gate already
+  // established). One global flag, mono-tenant — an admin who pauses the
+  // bot expects total silence, including automated follow-ups, so the
+  // entire scan pass is skipped, not just individual sends.
+  if (store.getAppConfig(db).botPaused) return;
 
   const is10am = isMexico10am(now);
   const stalled = conversations.listConversationsWithActivity(db);
