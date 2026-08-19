@@ -127,6 +127,20 @@ test('scanAndFollowup() no-ops when gemini is not configured', async () => {
   assert.equal(fetchImpl.calls.length, 0);
 });
 
+test('scanAndFollowup() no-ops when bot_paused is true, even with an otherwise-eligible conversation (PR13 follow-up fix)', async () => {
+  const db = freshDb();
+  const now = Date.now();
+  store.updateAppConfig(db, { botPaused: true });
+  seedStalledConversation(db, '5215500000001', now, 20 * MIN); // eligible for stage 1
+  const fetchImpl = fakeFetch();
+
+  await scanAndFollowup(db, { fetchImpl, now });
+
+  assert.equal(fetchImpl.calls.length, 0, 'expected no Gemini/send calls while paused');
+  const conv = conversations.getConversation(db, '5215500000001');
+  assert.ok(!conv.stageSentAt[1], 'expected no stage to be marked sent while paused');
+});
+
 test('scanAndFollowup() skips a conversation with fewer than 2 recorded turns (not enough context to nudge about)', async () => {
   const db = freshDb();
   const now = Date.now();
