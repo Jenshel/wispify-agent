@@ -21,6 +21,7 @@
     "chatbot"
   ],
   "author": "Wispify",
-  "dependencies": {},
-  "devDependencies": {}
+  "dependencies": {
+    "better-sqlite3": "^13.0.3"
+  }
 }
