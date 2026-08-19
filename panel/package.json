@@ -1,0 +1,21 @@
+{
+  "name": "wispify-panel",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Admin panel (guided setup + chat) for wispify-agent. Talks to the backend's /api/* routes over same-origin fetch with cookies.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.0.1",
+    "vite": "^8.0.1"
+  }
+}

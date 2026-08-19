@@ -1,0 +1,321 @@
+/* panel/src/index.css — dark theme, Wispify green accent. New styling, not
+   a port: visually inspired by WhiteLabel_WA_System's admin panel (dark
+   bg, #2ec78e/#56e3ab gradient accent), rebuilt from scratch for this
+   starter's own class names. `Inter` is declared as the preferred font but
+   not bundled here (no CDN/@fontsource dependency in this minimal PR) — it
+   falls back to the system UI stack when unavailable. */
+
+:root {
+  --bg: #0b0f14;
+  --bg-panel: #11161d;
+  --bg-card: #161c25;
+  --border: rgba(255, 255, 255, 0.08);
+  --text: #f5f7fa;
+  --text-dim: #9aa4b2;
+  --text-mute: #64748b;
+  --accent-green: #2ec78e;
+  --accent-green-deep: #56e3ab;
+  --danger: #f87171;
+  --font-main: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-main);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+.app-loading {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+}
+
+/* ── Login ─────────────────────────────────────────────────────────── */
+
+.login-screen {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.login-card {
+  width: 100%;
+  max-width: 360px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 32px 28px;
+}
+
+.login-brand {
+  font-size: 22px;
+  font-weight: 700;
+  background: linear-gradient(135deg, var(--accent-green), var(--accent-green-deep));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.login-subtitle {
+  color: var(--text-dim);
+  margin: 4px 0 20px;
+  font-size: 13px;
+}
+
+/* ── Fields, buttons, feedback ────────────────────────────────────── */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+
+.field-label {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.field-hint {
+  font-size: 12px;
+  color: var(--text-mute);
+  margin: 2px 0 0;
+}
+
+input[type='text'],
+input[type='password'],
+select {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 14px;
+  outline: none;
+}
+
+input:focus,
+select:focus {
+  border-color: var(--accent-green);
+}
+
+.btn-primary,
+.btn-secondary {
+  border-radius: 8px;
+  padding: 10px 16px;
+  font-weight: 600;
+  font-size: 14px;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-block;
+  text-align: center;
+}
+
+.btn-primary {
+  background: linear-gradient(135deg, var(--accent-green), var(--accent-green-deep));
+  color: #04120c;
+  border: none;
+}
+
+.btn-primary:hover {
+  filter: brightness(1.05);
+}
+
+.btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-secondary {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 13px;
+  padding: 8px 14px;
+}
+
+.form-error {
+  color: var(--danger);
+  font-size: 13px;
+  margin: 6px 0;
+}
+
+.form-success {
+  color: var(--accent-green-deep);
+  font-size: 13px;
+  margin: 6px 0;
+}
+
+/* ── Settings shell ───────────────────────────────────────────────── */
+
+.settings-shell-error {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+}
+
+.settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+
+.settings-brand {
+  font-weight: 700;
+  background: linear-gradient(135deg, var(--accent-green), var(--accent-green-deep));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.settings-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.settings-username {
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.settings-main {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 32px;
+}
+
+.settings-section h2 {
+  font-size: 13px;
+  margin: 0 0 12px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* ── Integration cards ────────────────────────────────────────────── */
+
+.integration-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+}
+
+.integration-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.integration-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.integration-card-header h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.status-pill {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 9px;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.status-pill-active {
+  background: rgba(46, 199, 142, 0.15);
+  color: var(--accent-green-deep);
+}
+
+.status-pill-error {
+  background: rgba(248, 113, 113, 0.15);
+  color: var(--danger);
+}
+
+.status-pill-unconfigured {
+  background: rgba(148, 163, 184, 0.15);
+  color: var(--text-dim);
+}
+
+.integration-meta {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.integration-meta-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.integration-meta dt {
+  text-transform: capitalize;
+}
+
+.integration-meta dd {
+  margin: 0;
+  font-family: monospace;
+}
+
+.toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.toggle-row input:disabled {
+  cursor: not-allowed;
+}
+
+.integration-form {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.oauth-link {
+  align-self: flex-start;
+}
+
+/* ── App config ────────────────────────────────────────────────────── */
+
+.app-config-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+  align-items: end;
+}
