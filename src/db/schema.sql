@@ -77,3 +77,32 @@ CREATE TABLE IF NOT EXISTS appointments (
   no_show_sent      INTEGER NOT NULL DEFAULT 0,
   created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
+
+-- Orders bookkeeping for the [PEDIDO_CONFIRMADO] checkout effect (Phase 9,
+-- src/agent/effects/order.js) + generic Stripe Checkout (src/routes/payments.js).
+-- Its own dedicated table, deliberately NOT a reuse of `appointments` above —
+-- same "different concern, different lifecycle, don't overload one
+-- polymorphic row shape" reasoning PR10 already established for this exact
+-- pair of tables (see appointments' own comment) — this table is that flag
+-- being honored, not just referenced.
+--
+-- `currency` is a snapshot taken at order-creation time (not re-read from
+-- app_config later), so a currency change in Settings after an order is
+-- placed never silently changes what an already-quoted customer is charged.
+-- `stripe_session_id`/`stripe_session_url` cache the last Checkout Session
+-- GET /pay/:orderId built, reused only while still fresh (see that route's
+-- own comment on why — the source system's equivalent `stripeSessionExpired`
+-- flag is read but never set anywhere in that codebase, a live bug this port
+-- does not repeat).
+CREATE TABLE IF NOT EXISTS orders (
+  id                    TEXT PRIMARY KEY,
+  customer_phone        TEXT NOT NULL,
+  products              TEXT NOT NULL,                      -- JSON array [{name, qty, price}]
+  total                 REAL NOT NULL DEFAULT 0,
+  currency              TEXT NOT NULL DEFAULT 'MXN',
+  status                TEXT NOT NULL DEFAULT 'pending',     -- pending | paid | cancelled
+  stripe_session_id     TEXT,
+  stripe_session_url    TEXT,
+  created_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);

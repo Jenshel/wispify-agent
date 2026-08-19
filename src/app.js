@@ -16,6 +16,7 @@
 const express = require('express');
 
 const { createWebhookRouter } = require('./channels/whatsapp/webhook');
+const { createPaymentsRouter } = require('./routes/payments');
 const createAuthRouter = require('./routes/auth');
 const createSettingsRouter = require('./routes/settings');
 const createFilesRouter = require('./routes/files');
@@ -51,8 +52,10 @@ function createApp({
   const app = express();
   app.set('trust proxy', 'loopback');
 
-  // Raw-body route FIRST — see header comment.
+  // Raw-body routes FIRST — see header comment. POST /webhook/stripe needs
+  // the same untouched byte stream for HMAC verification as POST /webhook.
   app.use('/', createWebhookRouter(db, { fetchImpl, dataDir, sleepImpl, randomImpl, onMessageProcessed }));
+  app.use('/', createPaymentsRouter(db, { fetchImpl }));
 
   app.use(express.json());
 
