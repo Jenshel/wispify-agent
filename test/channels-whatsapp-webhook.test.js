@@ -638,6 +638,43 @@ function rawPost(server, urlPath, bodyStr, headers) {
   });
 }
 
+// ── Phase 10 wiring: conversations table upsert (nudge stall-detection/context) ─
+
+test('POST /webhook records the inbound customer message AND the bot reply in the conversations table (Phase 10 integration seam for src/jobs/nudges.js)', async () => {
+  let resolveProcessed;
+  const processed = new Promise((resolve) => { resolveProcessed = resolve; });
+  const conversationsDb = require('../src/db/conversations');
+
+  const fetchImpl = async (url) => {
+    // gemini not configured in this test — brain falls back gracefully, so
+    // only Graph API calls (markAsRead/sendPacedReply) happen.
+    return { ok: true, status: 200, json: async () => ({ messages: [{ id: 'wamid.fake' }] }) };
+  };
+
+  const server = await bootServer({ fetchImpl, onMessageProcessed: (info) => resolveProcessed(info) });
+
+  const payload = textMessagePayload({ from: '5215500000005', text: 'Hola, quiero info' });
+  const bodyStr = JSON.stringify(payload);
+  const res = await httpPost(server, '/webhook', payload, { headers: { 'x-hub-signature-256': sign(bodyStr) } });
+  assert.equal(res.statusCode, 200);
+
+  try {
+    const info = await withTimeout(processed, 2000, 'message processing');
+    assert.ok(info.replyText);
+
+    const conv = conversationsDb.getConversation(server.db, '5215500000005');
+    assert.ok(conv, 'expected a conversations row to be created on a real inbound message');
+    assert.ok(conv.lastClientMessageAt, 'expected lastClientMessageAt to be set from the inbound message');
+    assert.equal(conv.recentTurns.length, 2, 'expected both the client turn AND the bot reply turn recorded');
+    assert.equal(conv.recentTurns[0].role, 'user');
+    assert.equal(conv.recentTurns[0].content, 'Hola, quiero info');
+    assert.equal(conv.recentTurns[1].role, 'bot');
+    assert.equal(conv.recentTurns[1].content, info.replyText);
+  } finally {
+    await server.close();
+  }
+});
+
 test('POST /webhook does not crash on an unparseable JSON body even after a valid signature', async () => {
   const server = await bootServer();
   const bodyStr = 'not-json{{{';

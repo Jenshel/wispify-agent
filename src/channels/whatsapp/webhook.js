@@ -19,6 +19,15 @@
 // so this fresh public starter ships secure-by-default instead: HMAC
 // verification is ALWAYS enforced, and a missing app_secret fails closed
 // (401), never accepts blindly.
+//
+// Phase 10 (tasks.md 10.1, src/jobs/nudges.js): handleIncomingMessage() is
+// also the sole write path for the new src/db/conversations.js table —
+// every real inbound customer message upserts last_client_message_at +
+// appends to the bounded recent-turns log, and the bot's own reply is
+// appended to that same log once client.sendPacedReply() succeeds. This is
+// the only place inbound messages are observed, so it is the natural
+// integration point (see src/db/conversations.js's header comment for why
+// this table exists at all).
 
 const express = require('express');
 const crypto = require('crypto');
@@ -27,6 +36,7 @@ const store = require('../../config/store');
 const client = require('./client');
 const mediaStore = require('../../media/store');
 const brain = require('../../brain');
+const conversations = require('../../db/conversations');
 
 // ── Meta HMAC verify (threat-matrix a) ───────────────────────────────────
 // Ported verbatim from the source's verifyMetaSignature(): the
@@ -197,6 +207,14 @@ function createWebhookRouter(
 
     if (!customerText.trim() && !media) return;
 
+    // Phase 10 (tasks.md 10.1, src/jobs/nudges.js): this is the ONLY place
+    // inbound messages are currently observed, so it is the natural
+    // integration point for the conversations table's stall-detection
+    // clock + bounded recent-turns context log. Real DB write, not
+    // in-memory state — the nudge job's dedupe/stall check reads this
+    // fresh on every scan.
+    conversations.recordClientMessage(db, from, { text: customerText });
+
     // Read receipt only — typing dots kick in later, once the pacing
     // decides it's time (see client.sendPacedReply()).
     await client.markAsRead(creds, { messageId }, { fetchImpl });
@@ -210,6 +228,14 @@ function createWebhookRouter(
         { to: from, messageId, customerText, replyText },
         { fetchImpl, sleepImpl, randomImpl }
       );
+      if (sendResult) {
+        // Append the bot's own reply to the SAME bounded log so nudge
+        // context includes both sides of the conversation, mirroring the
+        // source system's timeline.jsonl. Only recorded once the send
+        // actually succeeded — a failed send never claims the bot said
+        // something it didn't.
+        conversations.recordBotMessage(db, from, { text: replyText });
+      }
     }
 
     if (typeof onMessageProcessed === 'function') {
