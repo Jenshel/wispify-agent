@@ -4,12 +4,21 @@
 //
 // Kept minimal on purpose (design.md scope for this PR): JSON body parser,
 // the admin session/settings routes this PR builds, nothing from later
-// phases (webhook, brain, panel static assets, etc.).
+// phases (brain, panel static assets, etc.).
+//
+// Route ordering matters: the WhatsApp webhook router owns its OWN raw-body
+// parser (POST /webhook needs the untouched byte stream for HMAC
+// verification) and MUST be mounted before the global express.json() call
+// below — otherwise json() would already have consumed/parsed the request
+// body for every route by the time the webhook router's express.raw()
+// middleware runs.
 
 const express = require('express');
 
+const { createWebhookRouter } = require('./channels/whatsapp/webhook');
 const createAuthRouter = require('./routes/auth');
 const createSettingsRouter = require('./routes/settings');
+const createFilesRouter = require('./routes/files');
 
 /**
  * @param {{
@@ -19,17 +28,37 @@ const createSettingsRouter = require('./routes/settings');
  *   loginRateLimit?: {windowMs: number, max: number},
  *   verifyRateLimit?: {windowMs: number, max: number},
  *   oauthStartRateLimit?: {windowMs: number, max: number},
+ *   dataDir?: string,
+ *   sleepImpl?: (ms: number) => Promise<void>,
+ *   randomImpl?: () => number,
+ *   onMessageProcessed?: (info: object) => void,
  * }} opts
  */
-function createApp({ db, fetchImpl, sessionTtlMs, loginRateLimit, verifyRateLimit, oauthStartRateLimit } = {}) {
+function createApp({
+  db,
+  fetchImpl,
+  sessionTtlMs,
+  loginRateLimit,
+  verifyRateLimit,
+  oauthStartRateLimit,
+  dataDir,
+  sleepImpl,
+  randomImpl,
+  onMessageProcessed,
+} = {}) {
   if (!db) throw new Error('createApp() requires a db instance');
 
   const app = express();
   app.set('trust proxy', 'loopback');
+
+  // Raw-body route FIRST — see header comment.
+  app.use('/', createWebhookRouter(db, { fetchImpl, dataDir, sleepImpl, randomImpl, onMessageProcessed }));
+
   app.use(express.json());
 
   app.use('/api/auth', createAuthRouter(db, { sessionTtlMs, loginRateLimit }));
   app.use('/api/settings', createSettingsRouter(db, { fetchImpl, verifyRateLimit, oauthStartRateLimit }));
+  app.use('/api', createFilesRouter(db, { dataDir }));
 
   return app;
 }
