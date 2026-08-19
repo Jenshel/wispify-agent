@@ -1,13 +1,20 @@
 'use strict';
-// RED->GREEN for src/brain/prompt.js (tasks.md Phase 6.1).
+// RED->GREEN for src/brain/prompt.js (tasks.md Phase 6.1, extended by
+// Phase 7.1).
 //
 // Reference: WhiteLabel_WA_System/wa-brain-local/index.js's
 // buildSystemPrompt() — structural pattern only (config.context +
 // config.personalityCustom + soul-docs rules text assembled into a system
 // prompt), not a literal line-for-line port. See src/brain/prompt.js's own
-// header comment for the full scope-boundary rationale (no catalog table
-// yet, no control-tag protocol text yet — Phase 7 ships tags.js/pipeline.js
-// alongside the prompt blocks that describe them).
+// header comment for the full scope-boundary rationale.
+//
+// PR9/Phase 7 update: this file now DOES emit control-tag protocol
+// instructions for ESCALAR_HUMANO/DATOS_CONTACTO (always) and
+// CITA_CONFIRMADA/PEDIDO_CONFIRMADO (capability-gated) — landing in the
+// SAME PR as src/agent/tags.js + src/agent/pipeline.js, which parse/strip/
+// gate exactly those tags (PR8's own hard requirement: never ship prompt
+// instructions for a tag without the pipeline that handles it). ENVIAR_FOTO
+// is still never instructed — no catalog table exists yet to reference.
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
@@ -74,16 +81,59 @@ test('buildSystemPrompt() does not emit the decline lines when both capabilities
   assert.doesNotMatch(prompt, /no puedes generar enlaces de pago|no puedo generar enlaces de pago/i);
 });
 
-// ── Scope boundary: no control-tag protocol text yet (Phase 7's job) ────────
+// ── Control-tag protocol instructions (Phase 7 — lands with the pipeline
+// that parses/strips/gates these exact tags, see src/agent/tags.js and
+// src/agent/pipeline.js) ─────────────────────────────────────────────────
 
-test('buildSystemPrompt() never instructs the model to emit control tags yet (no tags.js/pipeline.js to strip them)', () => {
-  const prompt = buildSystemPrompt({ appConfig: {}, capabilities: { scheduling: true, payments: true } });
+test('buildSystemPrompt() always instructs [ESCALAR_HUMANO:reason], regardless of capability state', () => {
+  const prompt = buildSystemPrompt({ appConfig: {}, capabilities: {} });
+  assert.match(prompt, /\[ESCALAR_HUMANO:/);
+});
+
+test('buildSystemPrompt() always instructs [DATOS_CONTACTO]...[/DATOS_CONTACTO], regardless of capability state', () => {
+  const prompt = buildSystemPrompt({ appConfig: {}, capabilities: {} });
+  assert.match(prompt, /\[DATOS_CONTACTO\]/);
+  assert.match(prompt, /\[\/DATOS_CONTACTO\]/);
+});
+
+test('buildSystemPrompt() instructs [CITA_CONFIRMADA]...[/CITA_CONFIRMADA] with the exact parseable field labels when scheduling is on', () => {
+  const prompt = buildSystemPrompt({ appConfig: {}, capabilities: { scheduling: true, payments: false } });
+  assert.match(prompt, /\[CITA_CONFIRMADA\]/);
+  assert.match(prompt, /\[\/CITA_CONFIRMADA\]/);
+  assert.match(prompt, /Servicio:/);
+  assert.match(prompt, /Fecha:/);
+  assert.match(prompt, /Hora:/);
+  assert.match(prompt, /Duracion:/);
+  assert.match(prompt, /Pago:/);
+  assert.match(prompt, /Total:/);
+});
+
+test('buildSystemPrompt() omits [CITA_CONFIRMADA] instructions and keeps the decline line when scheduling is off', () => {
+  const prompt = buildSystemPrompt({ appConfig: {}, capabilities: { scheduling: false, payments: true } });
   assert.doesNotMatch(prompt, /\[CITA_CONFIRMADA\]/);
+  assert.match(prompt, /no puedes agendar|no puedo agendar/i);
+});
+
+test('buildSystemPrompt() instructs [PEDIDO_CONFIRMADO] with a parseable format when payments is on', () => {
+  const prompt = buildSystemPrompt({ appConfig: {}, capabilities: { scheduling: false, payments: true } });
+  assert.match(prompt, /PEDIDO_CONFIRMADO/);
+});
+
+test('buildSystemPrompt() omits [PEDIDO_CONFIRMADO] instructions and keeps the decline line when payments is off', () => {
+  const prompt = buildSystemPrompt({ appConfig: {}, capabilities: { scheduling: true, payments: false } });
   assert.doesNotMatch(prompt, /\[PEDIDO_CONFIRMADO\]/);
+  assert.match(prompt, /no puedes generar enlaces de pago|no puedo generar enlaces de pago/i);
+});
+
+// ── Scope boundary retained: ENVIAR_FOTO is never instructed (no catalog) ──
+
+test('buildSystemPrompt() never instructs [ENVIAR_FOTO] — no catalog table exists yet to reference', () => {
+  const prompt = buildSystemPrompt({ appConfig: {}, capabilities: { scheduling: true, payments: true } });
   assert.doesNotMatch(prompt, /\[ENVIAR_FOTO/);
 });
 
 test('buildSystemPrompt() accepts a catalog param without emitting product/photo-tag text (no catalog table yet)', () => {
   const prompt = buildSystemPrompt({ appConfig: {}, catalog: [{ name: 'Producto X', price: 100 }] });
   assert.doesNotMatch(prompt, /Producto X/);
+  assert.doesNotMatch(prompt, /\[ENVIAR_FOTO/);
 });

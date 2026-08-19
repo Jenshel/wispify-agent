@@ -16,6 +16,12 @@
 // module MUST call store.getAppConfig(db) fresh on every generateReply()
 // call, never cache/memoize at boot, so a soul-docs panel edit is visible
 // on the very next customer message. Covered explicitly below.
+//
+// PR9/Phase 7 update: generateReply() now runs src/agent/pipeline.js on
+// Gemini's raw reply before returning — the customer-visible return value
+// is ALWAYS cleanReply (tag-free), never the raw Gemini text. Effect calls
+// the pipeline emits (escalateHuman, captureContactData, ...) are dispatched
+// via src/agent/effects/*, threading the new `from` input param through.
 
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
@@ -161,4 +167,73 @@ test('generateReply() passes inbound media through to Gemini as inline base64', 
   const inlinePart = body.contents[0].parts.find((p) => p.inline_data);
   assert.ok(inlinePart);
   assert.equal(inlinePart.inline_data.data, Buffer.from('fake-jpeg-bytes').toString('base64'));
+});
+
+// ── Control-tag pipeline wiring (Phase 7) — the customer-safety guarantee ──
+
+function fakeGraphAndGemini(geminiReplyText) {
+  const geminiCalls = [];
+  const graphCalls = [];
+  const fetchImpl = async (url, opts) => {
+    if (String(url).includes('generativelanguage.googleapis.com')) {
+      geminiCalls.push({ url, opts });
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ candidates: [{ finishReason: 'STOP', content: { parts: [{ text: geminiReplyText }] } }] }),
+      };
+    }
+    graphCalls.push({ url, opts });
+    return { ok: true, status: 200, json: async () => ({ messages: [{ id: 'wamid.fake' }] }) };
+  };
+  fetchImpl.geminiCalls = geminiCalls;
+  fetchImpl.graphCalls = graphCalls;
+  return fetchImpl;
+}
+
+test('generateReply() returns cleanReply — raw bracket-tag syntax never reaches the returned string', async () => {
+  const db = freshDb();
+  activateGemini(db);
+  const fetchImpl = fakeGraphAndGemini('¡Listo! Te ayudo con eso.[ESCALAR_HUMANO:cliente molesto]');
+  const reply = await generateReply(db, { text: 'ayuda', from: '5215500000001' }, { fetchImpl });
+  assert.doesNotMatch(reply, /\[/);
+  assert.match(reply, /¡Listo! Te ayudo con eso\./);
+});
+
+test('generateReply() strips a [CITA_CONFIRMADA] block and never throws even though scheduling capability is off by default', async () => {
+  const db = freshDb();
+  activateGemini(db);
+  const fetchImpl = fakeGraphAndGemini(
+    '¡Confirmado![CITA_CONFIRMADA]\nServicio: Corte\nFecha: mañana\nHora: 10:00\n[/CITA_CONFIRMADA]'
+  );
+  const reply = await generateReply(db, { text: 'quiero agendar', from: '5215500000001' }, { fetchImpl });
+  assert.doesNotMatch(reply, /\[/);
+  assert.match(reply, /¡Confirmado!/);
+});
+
+test('generateReply() dispatches the escalateHuman effect and notifies the configured admin phone', async () => {
+  const db = freshDb();
+  activateGemini(db);
+  store.updateAppConfig(db, { adminPhone: '5215500009999' });
+  store.activateIntegration(db, 'meta', {
+    credentials: { access_token: 'EAAB_TEST', phone_number_id: '999888777', app_secret: 's', verify_token: 'v' },
+    publicMeta: {},
+  });
+
+  const fetchImpl = fakeGraphAndGemini('Un momento, te comunico con el equipo.[ESCALAR_HUMANO:cliente molesto]');
+  const reply = await generateReply(db, { text: 'quiero hablar con alguien', from: '5215500000001' }, { fetchImpl });
+
+  assert.doesNotMatch(reply, /\[/);
+  assert.equal(fetchImpl.graphCalls.length, 1);
+  const body = JSON.parse(fetchImpl.graphCalls[0].opts.body);
+  assert.equal(body.to, '5215500009999');
+  assert.match(body.text.body, /5215500000001/);
+  assert.match(body.text.body, /cliente molesto/);
+});
+
+test('generateReply() never throws when the model emits a control tag but no `from` was passed in', async () => {
+  const db = freshDb();
+  activateGemini(db);
+  const fetchImpl = fakeGraphAndGemini('Ok.[ESCALAR_HUMANO:motivo]');
+  await assert.doesNotReject(() => generateReply(db, { text: 'hola' }, { fetchImpl }));
 });
