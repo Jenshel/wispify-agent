@@ -202,6 +202,15 @@ function createWebhookRouter(
       }
     } else {
       console.log(`[WEBHOOK] unsupported message type '${type}' from ${from} — skipped`);
+      // PR12 follow-up fix: this is still a REAL inbound message from a
+      // genuinely engaged customer — the stall-detection clock
+      // (src/jobs/nudges.js) must reset even though the bot can't
+      // understand/generate a reply for this type. Only reply generation
+      // is skipped here, not activity tracking — otherwise a customer
+      // actively engaging via video/document/sticker/location/etc. looks
+      // stalled to the nudge job and can get an inappropriate "why did you
+      // stop responding" follow-up.
+      conversations.recordClientMessage(db, from, { text: '[mensaje no soportado]' });
       return;
     }
 

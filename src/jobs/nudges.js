@@ -206,7 +206,30 @@ async function generateMessage(stage, conv, { geminiCreds, fetchImpl }) {
   return result.text || null;
 }
 
-/** Decide which stage (if any) a conversation is due for this scan, mirroring the source's priority order (stage 4 highest). */
+/**
+ * Decide which stage (if any) a conversation is due for this scan.
+ *
+ * Priority order: stage 4 -> stage 1 -> stage 2 -> stage 3.
+ *
+ * Stage 4 is a genuine hard-deadline override (the 24h Meta window is about
+ * to close), so it is always checked first regardless of stage 1/2/3 state.
+ *
+ * Stage 1 is checked BEFORE stage 2 (PR12 follow-up fix — the original port
+ * checked stage 2 before stage 1, mirroring the source's if/else-if chain
+ * verbatim). If stage 1's Gemini call ever fails/returns empty,
+ * `stageSentAt[1]` is never set, so stage 1 stays "eligible" forever. Under
+ * the old order, once `elapsed` later crossed the stage-2 threshold, stage 2
+ * fired FIRST (checked earlier in the chain) and got marked sent — then on a
+ * later scan stage 2 was already sent, so stage 1 (checked last, still
+ * eligible) fired AFTER stage 2 already went out, inverting the intended
+ * escalating-urgency order. Checking stage 1 first closes that path
+ * entirely: if stage 1 is still unsent, it always gets a chance to send
+ * before stage 2 is ever considered.
+ *
+ * Stage 3 keeps its position last — it already requires stage 2 to have
+ * been sent as a precondition, so its relative position to stage 1/2 does
+ * not matter.
+ */
 function decideStage(conv, { now, is10am }) {
   const lastClientMs = new Date(conv.lastClientMessageAt).getTime();
   if (Number.isNaN(lastClientMs)) return null;
@@ -218,17 +241,17 @@ function decideStage(conv, { now, is10am }) {
   if (elapsed < STAGE_1_DELAY_MS) return null; // client responded recently
   if (conv.recentTurns.length < MIN_CONTEXT_TURNS) return null; // not enough context
 
-  // Stage 4: 5 min before window closes (highest priority)
+  // Stage 4: 5 min before window closes (highest priority — hard deadline override)
   if (remaining <= STAGE_4_THRESHOLD_MS && !conv.stageSentAt[4]) return 4;
 
-  // Stage 3: next day at 10am Mexico time, ONLY if stage 2 was already sent
-  if (is10am && !conv.stageSentAt[3] && elapsed > STAGE_2_DELAY_MS && conv.stageSentAt[2]) return 3;
+  // Stage 1: 15 min after last client message — checked before stage 2
+  if (elapsed >= STAGE_1_DELAY_MS && !conv.stageSentAt[1]) return 1;
 
   // Stage 2: 1 hour after last client message
   if (elapsed >= STAGE_2_DELAY_MS && !conv.stageSentAt[2]) return 2;
 
-  // Stage 1: 15 min after last client message
-  if (elapsed >= STAGE_1_DELAY_MS && !conv.stageSentAt[1]) return 1;
+  // Stage 3: next day at 10am Mexico time, ONLY if stage 2 was already sent
+  if (is10am && !conv.stageSentAt[3] && elapsed > STAGE_2_DELAY_MS && conv.stageSentAt[2]) return 3;
 
   return null;
 }
@@ -266,6 +289,25 @@ async function scanAndFollowup(db, { fetchImpl, now = Date.now() } = {}) {
       continue;
     }
 
+    // Stale-snapshot guard (PR12 follow-up fix): `conv` is a snapshot taken
+    // at the TOP of this scan, and generateMessage() above just did a real
+    // network round-trip to Gemini that can take real seconds. If the
+    // customer sent a genuine reply via the webhook while this nudge was
+    // mid-flight (the webhook writes last_client_message_at immediately via
+    // conversations.recordClientMessage), sending now would deliver a
+    // stale "you went quiet" nudge. Re-fetch the conversation FRESH and
+    // re-run decideStage() against it before the second network round-trip
+    // (the actual WhatsApp send) ever happens — if the fresh decision no
+    // longer matches, the conversation state changed mid-flight (a reply
+    // landed, or another process already marked this stage sent) and this
+    // nudge must never go out.
+    const freshConv = conversations.getConversation(db, conv.customerPhone);
+    const freshStage = freshConv ? decideStage(freshConv, { now, is10am }) : null;
+    if (freshStage !== stageToSend) {
+      console.log(`[NUDGE] stage ${stageToSend} for ${conv.customerPhone} skipped — conversation state changed mid-flight`);
+      continue;
+    }
+
     const sent = await client.sendText(metaCreds, { to: conv.customerPhone, text: message }, { fetchImpl });
     if (sent) {
       const nowIso = new Date(now).toISOString();
@@ -285,8 +327,27 @@ async function scanAndFollowup(db, { fetchImpl, now = Date.now() } = {}) {
  */
 function startNudgeJob(db, { fetchImpl, intervalMs = SCAN_INTERVAL_MS, startDelayMs = START_DELAY_MS } = {}) {
   let interval = null;
+  // Reentrancy guard (PR12 follow-up fix): markStageSent() is an
+  // unconditional UPDATE with no locking, and this is a plain setInterval
+  // with no check for whether the previous scan's promise is still
+  // pending. If a scan runs long (many conversations, slow Gemini/Meta
+  // responses) and overlaps the next tick, two concurrent scanAndFollowup()
+  // calls could both see the same conversation as "stage not yet sent" and
+  // both send it — a duplicate nudge to the same customer. Same-process
+  // only, no schema/cross-process locking needed (matches this repo's
+  // "keep it minimal" convention) — an in-memory flag is sufficient.
+  let scanning = false;
   const runScan = () => {
-    scanAndFollowup(db, { fetchImpl }).catch((err) => console.error('[NUDGE] scan failed:', err.message));
+    if (scanning) {
+      console.log('[NUDGE] scan already in progress, skipping this tick');
+      return;
+    }
+    scanning = true;
+    scanAndFollowup(db, { fetchImpl })
+      .catch((err) => console.error('[NUDGE] scan failed:', err.message))
+      .finally(() => {
+        scanning = false;
+      });
   };
   const timeout = setTimeout(() => {
     runScan();

@@ -20,7 +20,7 @@ const crypto = require('node:crypto');
 const { openDatabase } = require('../src/db');
 const store = require('../src/config/store');
 const conversations = require('../src/db/conversations');
-const { scanAndFollowup, stripOpeningPunctuation, isMexico10am } = require('../src/jobs/nudges');
+const { scanAndFollowup, startNudgeJob, stripOpeningPunctuation, isMexico10am } = require('../src/jobs/nudges');
 
 let prevKey;
 before(() => {
@@ -237,7 +237,10 @@ test('scanAndFollowup() sends stage 3 at 10am Mexico time ONLY when stage 2 was 
 test('scanAndFollowup() does NOT send stage 3 at 10am if stage 2 was never sent', async () => {
   const db = freshDb();
   const now = Date.UTC(2030, 0, 16, 16, 5, 0); // 10:05am Mexico
-  seedStalledConversation(db, '5215500000001', now, 20 * HOUR); // no stagesSent at all
+  const phone = '5215500000001';
+  // Stage 1 already sent (so the stage-1-before-stage-2 priority order
+  // doesn't intercept this scan), stage 2 never sent.
+  seedStalledConversation(db, phone, now, 20 * HOUR, { stagesSent: { 1: new Date(now - 19 * HOUR).toISOString() } });
   const fetchImpl = fakeFetch();
 
   await scanAndFollowup(db, { fetchImpl, now });
@@ -324,4 +327,177 @@ test('scanAndFollowup() handles multiple stalled conversations independently in 
   assert.equal(fetchImpl.sendCalls().length, 2);
   assert.ok(conversations.getConversation(db, '5215500000001').stageSentAt[1]);
   assert.ok(conversations.getConversation(db, '5215500000002').stageSentAt[2]);
+});
+
+// ── Stage priority order: stage 1 before stage 2 (PR12 follow-up fix) ────
+// The original port checked stage 2 before stage 1 (mirroring the source's
+// if/else-if chain verbatim). If stage 1 never gets marked sent (e.g. an
+// earlier Gemini failure), a later scan whose elapsed time crosses the
+// stage-2 threshold would fire stage 2 FIRST — then on a subsequent scan,
+// stage 1 (still eligible, checked last) would fire AFTER stage 2 already
+// went out, inverting the intended escalating-urgency order. Priority is
+// now stage 4 -> stage 1 -> stage 2 -> stage 3.
+
+test('decideStage priority: a conversation stalled past the stage-2 threshold with stage 1 never sent sends stage 1 first, not stage 2', async () => {
+  const db = freshDb();
+  const now = Date.now();
+  const phone = '5215500000001';
+  seedStalledConversation(db, phone, now, 70 * MIN); // past both stage-1 (15m) and stage-2 (1h) thresholds, nothing sent yet
+  const fetchImpl = fakeFetch();
+
+  await scanAndFollowup(db, { fetchImpl, now });
+
+  const gBody = JSON.parse(fetchImpl.geminiCalls()[0].opts.body);
+  assert.match(gBody.system_instruction.parts[0].text, /15 minutos/);
+  const conv = conversations.getConversation(db, phone);
+  assert.ok(conv.stageSentAt[1]);
+  assert.equal(conv.stageSentAt[2], null);
+});
+
+test('decideStage priority: once stage 1 is marked sent, a subsequent scan correctly progresses to stage 2 if still eligible', async () => {
+  const db = freshDb();
+  const now = Date.now();
+  const phone = '5215500000001';
+  seedStalledConversation(db, phone, now, 70 * MIN);
+  const fetchImpl = fakeFetch();
+
+  await scanAndFollowup(db, { fetchImpl, now }); // sends stage 1
+  await scanAndFollowup(db, { fetchImpl, now: now + 1000 }); // stage 1 already sent, still >= 1h elapsed
+
+  assert.equal(fetchImpl.geminiCalls().length, 2);
+  const gBody = JSON.parse(fetchImpl.geminiCalls()[1].opts.body);
+  assert.match(gBody.system_instruction.parts[0].text, /1 hora/);
+  assert.ok(conversations.getConversation(db, phone).stageSentAt[2]);
+});
+
+test('decideStage priority: stage 4 still overrides regardless of stage 1/2 state when the window is about to close', async () => {
+  const db = freshDb();
+  const now = Date.now();
+  const phone = '5215500000001';
+  // Neither stage 1 nor stage 2 sent — both would technically be eligible
+  // too, but stage 4 (hard deadline) must win.
+  seedStalledConversation(db, phone, now, 23 * HOUR + 58 * MIN);
+  const fetchImpl = fakeFetch();
+
+  await scanAndFollowup(db, { fetchImpl, now });
+
+  const gBody = JSON.parse(fetchImpl.geminiCalls()[0].opts.body);
+  assert.match(gBody.system_instruction.parts[0].text, /5 MINUTOS/);
+  const conv = conversations.getConversation(db, phone);
+  assert.ok(conv.stageSentAt[4]);
+  assert.equal(conv.stageSentAt[1], null);
+  assert.equal(conv.stageSentAt[2], null);
+});
+
+// ── Stale-snapshot race guard (PR12 follow-up fix) ───────────────────────
+// scanAndFollowup() takes one snapshot of all conversations at the top of
+// the scan, decides a stage from it, then does TWO real network
+// round-trips (Gemini generateMessage, then WhatsApp sendText) before
+// writing markStageSent. If the customer sends a genuine reply via the
+// webhook while a nudge for them is mid-flight, the job must re-check
+// fresh state before the actual send and skip rather than deliver a stale
+// "you went quiet" nudge.
+
+test('scanAndFollowup() re-checks conversation state after Gemini generation and skips sending if the customer replied mid-flight', async () => {
+  const db = freshDb();
+  const now = Date.now();
+  const phone = '5215500000001';
+  seedStalledConversation(db, phone, now, 16 * MIN);
+
+  const calls = [];
+  const fetchImpl = async (url, opts) => {
+    calls.push({ url, opts });
+    if (url.includes('generativelanguage.googleapis.com')) {
+      // Simulate a fresh customer reply landing via the webhook WHILE
+      // Gemini is generating the nudge — recordClientMessage() is exactly
+      // what src/channels/whatsapp/webhook.js calls on a real inbound
+      // message, bumping last_client_message_at immediately.
+      conversations.recordClientMessage(db, phone, { text: 'ya volví, seguimos?', now: new Date(now).toISOString() });
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          candidates: [{ finishReason: 'STOP', content: { parts: [{ text: '¡Seguimos platicando?' }] } }],
+        }),
+      };
+    }
+    return { ok: true, status: 200, json: async () => ({ messages: [{ id: 'wamid.fake' }] }) };
+  };
+
+  await scanAndFollowup(db, { fetchImpl, now });
+
+  // Gemini generation happened (the nudge was mid-flight), but the fresh
+  // re-check must have caught the reply and skipped the actual send.
+  assert.equal(calls.filter((c) => c.url.includes('generativelanguage.googleapis.com')).length, 1);
+  assert.equal(calls.filter((c) => c.url.includes('/messages')).length, 0);
+
+  const conv = conversations.getConversation(db, phone);
+  assert.equal(conv.stageSentAt[1], null);
+});
+
+test('scanAndFollowup() still sends normally when nothing changes between generation and send (no false-positive skip)', async () => {
+  const db = freshDb();
+  const now = Date.now();
+  const phone = '5215500000001';
+  seedStalledConversation(db, phone, now, 16 * MIN);
+  const fetchImpl = fakeFetch();
+
+  await scanAndFollowup(db, { fetchImpl, now });
+
+  assert.equal(fetchImpl.sendCalls().length, 1);
+  assert.ok(conversations.getConversation(db, phone).stageSentAt[1]);
+});
+
+// ── Reentrancy guard on the scan interval (PR12 follow-up fix) ───────────
+// markStageSent() is an unconditional UPDATE with no locking, and
+// startNudgeJob()'s setInterval had no check for whether the previous
+// scan's promise was still pending. A slow scan overlapping the next tick
+// could let two concurrent scanAndFollowup() calls both see a conversation
+// as "stage not yet sent" and both send it.
+
+test('startNudgeJob() skips an overlapping scan tick while the previous scan is still in flight, preventing duplicate sends', async () => {
+  const db = freshDb();
+  const now = Date.now();
+  const phone = '5215500000001';
+  seedStalledConversation(db, phone, now, 16 * MIN);
+
+  let geminiCallCount = 0;
+  const fetchImpl = async (url) => {
+    if (url.includes('generativelanguage.googleapis.com')) {
+      geminiCallCount += 1;
+      // Slow enough to still be in flight across several 20ms interval ticks.
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          candidates: [{ finishReason: 'STOP', content: { parts: [{ text: 'Seguimos?' }] } }],
+        }),
+      };
+    }
+    return { ok: true, status: 200, json: async () => ({ messages: [{ id: 'wamid.fake' }] }) };
+  };
+
+  const logs = [];
+  const origLog = console.log;
+  console.log = (...args) => {
+    logs.push(args.join(' '));
+  };
+
+  const job = startNudgeJob(db, { fetchImpl, startDelayMs: 0, intervalMs: 20 });
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 250)); // several ticks fire while the first scan is still running
+  } finally {
+    job.stop();
+    console.log = origLog;
+  }
+
+  // Only ONE scan ever ran end-to-end — every overlapping tick was skipped
+  // by the reentrancy guard, so exactly one Gemini call happened, not
+  // several concurrent duplicate calls.
+  assert.equal(geminiCallCount, 1, 'expected overlapping ticks to be skipped, not run concurrently');
+  assert.ok(logs.some((l) => l.includes('scan already in progress, skipping this tick')));
+
+  const conv = conversations.getConversation(db, phone);
+  assert.ok(conv.stageSentAt[1]);
 });

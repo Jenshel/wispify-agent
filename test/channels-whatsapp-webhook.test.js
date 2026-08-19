@@ -675,6 +675,47 @@ test('POST /webhook records the inbound customer message AND the bot reply in th
   }
 });
 
+// ── Phase 10 follow-up fix: unsupported message types still reset the stall clock ─
+
+test('POST /webhook resets the stall-detection clock for an unsupported message type (sticker) even though no reply is generated', async () => {
+  const conversationsDb = require('../src/db/conversations');
+  const server = await bootServer();
+
+  const payload = {
+    object: 'whatsapp_business_account',
+    entry: [
+      {
+        id: 'WABA_ID',
+        changes: [
+          {
+            field: 'messages',
+            value: {
+              metadata: { phone_number_id: '999888777' },
+              messages: [
+                { from: '5215500000009', id: 'wamid.STK1', type: 'sticker', sticker: { id: 'STICKER_ID_1', mime_type: 'image/webp' } },
+              ],
+            },
+          },
+        ],
+      },
+    ],
+  };
+  const bodyStr = JSON.stringify(payload);
+  const res = await httpPost(server, '/webhook', payload, { headers: { 'x-hub-signature-256': sign(bodyStr) } });
+  assert.equal(res.statusCode, 200);
+
+  // No onMessageProcessed hook fires for unsupported types (the handler
+  // returns before reaching it) — the write is fire-and-forget from the
+  // POST handler's perspective, so poll briefly instead.
+  await new Promise((resolve) => setTimeout(resolve, 150));
+
+  const conv = conversationsDb.getConversation(server.db, '5215500000009');
+  assert.ok(conv, 'expected a conversations row to be created even for an unsupported message type');
+  assert.ok(conv.lastClientMessageAt, 'expected the stall-detection clock to be reset');
+
+  await server.close();
+});
+
 test('POST /webhook does not crash on an unparseable JSON body even after a valid signature', async () => {
   const server = await bootServer();
   const bodyStr = 'not-json{{{';
