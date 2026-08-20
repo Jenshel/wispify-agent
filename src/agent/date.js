@@ -10,17 +10,23 @@
 // guards in src/agent/effects/appointment.js have something real to
 // compare against.
 //
-// Deliberately hardcodes the Mexico City UTC-6 offset (no DST in Mexico
-// City) exactly like the source — app_config.timezone is NOT wired into
-// this resolution yet. This is an explicit scope boundary carried forward
-// from the port (same open-item pattern as this repo's other "not wired
-// yet" notes), not an oversight — see apply-progress.
+// app_config.timezone is wired into this resolution as of PR17, via
+// src/agent/timezone.js's shared Intl-based helper — both parseFlexDate()
+// and toApptDate() below take an optional `timezoneName`, defaulting to
+// Mexico City (this module's original hardcoded behavior) when omitted, so
+// every pre-PR17 caller/test keeps working unchanged.
+//
+// MX_OFFSET_SUFFIX is kept (still exported) purely for
+// src/jobs/appointment-reminders.js's own, separate, still-hardcoded use —
+// that module is out of PR17's explicit scope (only src/agent/date.js and
+// src/jobs/nudges.js were asked to read the configured timezone).
 //
 // Pure function, no I/O — `now` is injectable so "hoy"/"mañana"/weekday
 // resolution and the past-time guard that reads this module's output are
 // fully deterministic in tests, unlike the source's bare Date.now() call.
 
-const MX_OFFSET_MS = -6 * 3600 * 1000;
+const { getWallClockParts, zonedTimeToInstant } = require('./timezone');
+
 const MX_OFFSET_SUFFIX = '-06:00';
 
 const MESES = {
@@ -39,10 +45,10 @@ const DIAS = { lunes: 1, martes: 2, miercoles: 3, jueves: 4, viernes: 5, sabado:
  * silently defaulting to today for an unparseable date).
  * @param {string} dateStr
  * @param {string} timeStr
- * @param {{now?: number}} [opts]
+ * @param {{now?: number, timezoneName?: string}} [opts]
  * @returns {string} e.g. "2026-08-21T15:00:00"
  */
-function parseFlexDate(dateStr, timeStr, { now = Date.now() } = {}) {
+function parseFlexDate(dateStr, timeStr, { now = Date.now(), timezoneName } = {}) {
   const timeParts = (timeStr || '10:00').match(/(\d{1,2}):(\d{2})/);
   const hours = timeParts ? parseInt(timeParts[1], 10) : 10;
   const minutes = timeParts ? parseInt(timeParts[2], 10) : 0;
@@ -52,11 +58,7 @@ function parseFlexDate(dateStr, timeStr, { now = Date.now() } = {}) {
     return `${trimmed}T${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:00`;
   }
 
-  const nowMxDate = new Date(now + MX_OFFSET_MS);
-  const todayY = nowMxDate.getUTCFullYear();
-  const todayM = nowMxDate.getUTCMonth();
-  const todayD = nowMxDate.getUTCDate();
-  const todayDow = nowMxDate.getUTCDay();
+  const { year: todayY, month: todayM, day: todayD, weekday: todayDow } = getWallClockParts(now, timezoneName);
 
   const lower = (dateStr || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
 
@@ -114,9 +116,15 @@ function parseFlexDate(dateStr, timeStr, { now = Date.now() } = {}) {
   return `${targetY}-${mm}-${dd}T${hh}:${min}:00`;
 }
 
-/** Convert parseFlexDate()'s naive local ISO string into a real Date (Mexico City, UTC-6). */
-function toApptDate(resolvedIso) {
-  return new Date(`${resolvedIso}${MX_OFFSET_SUFFIX}`);
+/**
+ * Convert parseFlexDate()'s naive local ISO string into a real Date, in
+ * `timezoneName` (defaults to Mexico City, this function's original
+ * hardcoded behavior, when omitted).
+ * @param {string} resolvedIso
+ * @param {string} [timezoneName]
+ */
+function toApptDate(resolvedIso, timezoneName) {
+  return zonedTimeToInstant(resolvedIso, timezoneName);
 }
 
 module.exports = { parseFlexDate, toApptDate, MX_OFFSET_SUFFIX };

@@ -93,12 +93,13 @@ async function confirmAppointment(
   const paymentMethod = PAYMENT_METHOD_MAP[paymentRaw] || 'cash';
   const totalNum = Number(total) || 0;
 
-  const resolvedIso = parseFlexDate(fecha, hora, { now });
+  const timezoneName = store.getAppConfig(db).timezone;
+  const resolvedIso = parseFlexDate(fecha, hora, { now, timezoneName });
   const date = resolvedIso.slice(0, 10);
   const time = resolvedIso.slice(11, 16);
 
   // ── Guard 1: reject a resolved time that has already passed ───────────
-  const apptDateTime = toApptDate(resolvedIso);
+  const apptDateTime = toApptDate(resolvedIso, timezoneName);
   if (Number.isNaN(apptDateTime.getTime()) || apptDateTime.getTime() < now - PAST_GRACE_MS) {
     console.warn(`[CITA_CONFIRMADA] rejected — resolved time ${resolvedIso} already passed (from=${from})`);
     await notifyCustomer(db, from, 'Esa hora ya pasó. ¿Me confirmas otro día u horario que sí esté disponible?', { fetchImpl });

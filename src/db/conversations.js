@@ -11,9 +11,10 @@
 // PR10/PR11 established for appointments/orders).
 //
 // Deliberately NOT built here (still out of scope — see schema.sql):
-// conversation-level pause/archived/status/message-limit guards, and
-// wiring [DATOS_CONTACTO] to populate contact_name/business_name (a
-// documented future injection point from PR9's contact-data.js).
+// conversation-level pause/archived/status/message-limit guards.
+// [DATOS_CONTACTO] persistence (contact_name/business_name) is wired via
+// setContactInfo() below, closing the "FUTURE INJECTION POINT" PR9's
+// contact-data.js documented — see that module for the effect-handler side.
 //
 // Every accessor takes `db` explicitly, same convention as
 // src/db/appointments.js/src/db/orders.js, so tests always run against an
@@ -183,6 +184,38 @@ function markRead(db, customerPhone, { now = new Date().toISOString() } = {}) {
 }
 
 /**
+ * Persist a [DATOS_CONTACTO] capture onto the conversation row (PR17 —
+ * closes the "FUTURE INJECTION POINT" src/agent/effects/contact-data.js
+ * documented since PR9). Same ensureConversation()-first + partial-UPDATE
+ * shape as setPinned()/setArchived()/markRead() above.
+ *
+ * Only writes a field that is actually non-empty — src/agent/tags.js's
+ * parseContactFields() returns '' (never undefined/null) for a field the
+ * model didn't include in the tag body, and a later partial capture (e.g.
+ * name only, no negocio) must never blank out a value already captured.
+ * @param {import('better-sqlite3').Database} db
+ * @param {string} customerPhone
+ * @param {{contactName?: string, businessName?: string}} [fields]
+ */
+function setContactInfo(db, customerPhone, { contactName, businessName } = {}) {
+  ensureConversation(db, customerPhone);
+  const sets = [];
+  const params = { phone: customerPhone };
+  if (contactName) {
+    sets.push('contact_name = @contactName');
+    params.contactName = contactName;
+  }
+  if (businessName) {
+    sets.push('business_name = @businessName');
+    params.businessName = businessName;
+  }
+  if (!sets.length) return getConversation(db, customerPhone);
+  sets.push(`updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`);
+  db.prepare(`UPDATE conversations SET ${sets.join(', ')} WHERE customer_phone = @phone`).run(params);
+  return getConversation(db, customerPhone);
+}
+
+/**
  * All conversations for the panel's ChatView list (tasks.md Phase 11.1) —
  * unlike listConversationsWithActivity() above (the nudge scan's source,
  * which requires a real client message), this includes every row so a
@@ -210,6 +243,7 @@ module.exports = {
   recordBotMessage,
   listConversationsWithActivity,
   markStageSent,
+  setContactInfo,
   setPinned,
   setArchived,
   markRead,

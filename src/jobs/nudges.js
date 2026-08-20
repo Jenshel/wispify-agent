@@ -54,11 +54,11 @@ const store = require('../config/store');
 const client = require('../channels/whatsapp/client');
 const gemini = require('../brain/gemini');
 const conversations = require('../db/conversations');
+const { getWallClockParts } = require('../agent/timezone');
 
 const SCAN_INTERVAL_MS = 2 * 60 * 1000; // scan every 2 minutes
 const START_DELAY_MS = 45 * 1000; // ported verbatim from the source's boot delay
 const WINDOW_TOTAL_MS = 24 * 60 * 60 * 1000; // 24h Meta window
-const MEXICO_OFFSET_MS = -6 * 60 * 60 * 1000; // UTC-6 (no DST)
 
 // Stage timing
 const STAGE_1_DELAY_MS = 15 * 60 * 1000; // 15 min after last client msg
@@ -158,15 +158,19 @@ function stripOpeningPunctuation(text) {
   return text.replace(/[¡¿]/g, '');
 }
 
-/** Mexico City wall-clock Date for a given instant (UTC-6, no DST — same convention as src/agent/date.js). `now` is already a UTC epoch-ms instant, so no local-timezone correction is needed (unlike the source's getMexicoNow(), which read the server's own local clock via a bare `new Date()`). */
-function getMexicoDate(now) {
-  return new Date(now + MEXICO_OFFSET_MS);
-}
-
-/** True when Mexico-local time is 10:00-10:11 (matches the source's `mx.getMinutes() < 12` window). */
-function isMexico10am(now = Date.now()) {
-  const mx = getMexicoDate(now);
-  return mx.getUTCHours() === 10 && mx.getUTCMinutes() < 12;
+/**
+ * True when the wall-clock time in `timezoneName` (app_config.timezone as
+ * of PR17 — defaults to Mexico City when omitted, this function's original
+ * hardcoded behavior) is 10:00-10:11 (matches the source's
+ * `mx.getMinutes() < 12` window). Reads app_config.timezone through
+ * src/agent/timezone.js's shared Intl-based helper instead of a hardcoded
+ * UTC-6 offset constant.
+ * @param {number} [now]
+ * @param {string} [timezoneName]
+ */
+function isMexico10am(now = Date.now(), timezoneName) {
+  const { hour, minute } = getWallClockParts(now, timezoneName);
+  return hour === 10 && minute < 12;
 }
 
 /** Build the stage's userMessage (conversation summary + contact/business name + stage label), mirroring the source's template. */
@@ -278,9 +282,14 @@ async function scanAndFollowup(db, { fetchImpl, now = Date.now() } = {}) {
   // established). One global flag, mono-tenant — an admin who pauses the
   // bot expects total silence, including automated follow-ups, so the
   // entire scan pass is skipped, not just individual sends.
-  if (store.getAppConfig(db).botPaused) return;
+  const appConfig = store.getAppConfig(db);
+  if (appConfig.botPaused) return;
 
-  const is10am = isMexico10am(now);
+  // PR17: read app_config.timezone FRESH on every scan too (same "no
+  // caching, apply live" discipline) — the stage-3 "10am" trigger below
+  // must reflect the currently-configured business timezone, not a
+  // hardcoded Mexico City offset.
+  const is10am = isMexico10am(now, appConfig.timezone);
   const stalled = conversations.listConversationsWithActivity(db);
 
   for (const conv of stalled) {

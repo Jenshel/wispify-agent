@@ -8,6 +8,8 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
+const { openDatabase } = require('../src/db');
+const conversations = require('../src/db/conversations');
 const effects = require('../src/agent/effects');
 
 test('effects.dispatch exposes a handler for every effect name runPipeline() can emit', () => {
@@ -46,6 +48,25 @@ test('dispatchEffectCalls() never throws on an unknown effect name — logs and 
 test('dispatchEffectCalls() returns an empty array for an empty effectCalls list', async () => {
   const results = await effects.dispatchEffectCalls([], {});
   assert.deepEqual(results, []);
+});
+
+test('dispatchEffectCalls() persists a real captureContactData round-trip onto the conversations table when db is in ctx (PR17)', async () => {
+  const db = openDatabase(':memory:');
+  const effectCalls = [{ effect: 'captureContactData', payload: { name: 'Ana', business: 'Bella Studio' } }];
+  const results = await effects.dispatchEffectCalls(effectCalls, { db, from: '5215500000001' });
+  assert.equal(results[0].result.captured, true);
+  assert.equal(results[0].result.persisted, true);
+
+  const conv = conversations.getConversation(db, '5215500000001');
+  assert.equal(conv.contactName, 'Ana');
+  assert.equal(conv.businessName, 'Bella Studio');
+});
+
+test('dispatchEffectCalls() degrades captureContactData gracefully (persisted:false, no throw) when ctx has no db/from', async () => {
+  const effectCalls = [{ effect: 'captureContactData', payload: { name: 'Ana', business: 'Bella Studio', from: '5215500000001' } }];
+  const results = await effects.dispatchEffectCalls(effectCalls, {});
+  assert.equal(results[0].result.captured, true);
+  assert.equal(results[0].result.persisted, false);
 });
 
 test('dispatchEffectCalls() runs multiple effect calls and preserves order in the results array', async () => {

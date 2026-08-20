@@ -105,6 +105,22 @@ test('isMexico10am() is false outside the 10:00-10:11 window', () => {
   assert.equal(isMexico10am(Date.UTC(2030, 0, 15, 22, 0, 0)), false); // 16:00 MX
 });
 
+// ── app_config.timezone wiring (PR17) ────────────────────────────────────
+
+test('isMexico10am() defaults to Mexico City when no timezone is given (unchanged default behavior)', () => {
+  assert.equal(isMexico10am(Date.UTC(2030, 0, 15, 16, 0, 0)), true);
+  assert.equal(isMexico10am(Date.UTC(2030, 0, 15, 16, 0, 0), 'America/Mexico_City'), true);
+});
+
+test('isMexico10am() respects a DIFFERENT configured timezone — the SAME instant reads differently in Bogota (UTC-5) vs Mexico City (UTC-6)', () => {
+  // 15:05 UTC: Bogota (UTC-5) reads 10:05 (inside the window); Mexico City
+  // (UTC-6) reads 09:05 (outside it). A hardcoded-Mexico implementation
+  // would report false for both — this proves the zone parameter is real.
+  const now = Date.UTC(2030, 0, 16, 15, 5, 0);
+  assert.equal(isMexico10am(now), false); // default Mexico City reading: 09:05
+  assert.equal(isMexico10am(now, 'America/Bogota'), true); // Bogota reading: 10:05
+});
+
 // ── scanAndFollowup() — capability gating (graceful no-op) ──────────────
 
 test('scanAndFollowup() no-ops when meta is not configured', async () => {
@@ -262,6 +278,38 @@ test('scanAndFollowup() does NOT send stage 3 at 10am if stage 2 was never sent'
   // elapsed (20h) >= stage-2 threshold and stage 2 not sent -> stage 2 fires instead of stage 3.
   const gBody = JSON.parse(fetchImpl.geminiCalls()[0].opts.body);
   assert.match(gBody.system_instruction.parts[0].text, /1 hora/);
+});
+
+test('scanAndFollowup() reads app_config.timezone for the stage-3 10am trigger — fires in a Bogota-configured business at an instant that is 10am Bogota but only 9am Mexico City', async () => {
+  const db = freshDb();
+  store.updateAppConfig(db, { timezone: 'America/Bogota' });
+  const now = Date.UTC(2030, 0, 16, 15, 5, 0); // 10:05 Bogota / 09:05 Mexico City
+  const phone = '5215500000001';
+  seedStalledConversation(db, phone, now, 20 * HOUR, {
+    stagesSent: { 1: new Date(now - 19 * HOUR).toISOString(), 2: new Date(now - 18 * HOUR).toISOString() },
+  });
+  const fetchImpl = fakeFetch();
+
+  await scanAndFollowup(db, { fetchImpl, now });
+
+  const gBody = JSON.parse(fetchImpl.geminiCalls()[0].opts.body);
+  assert.match(gBody.system_instruction.parts[0].text, /nuevo día/);
+  assert.ok(conversations.getConversation(db, phone).stageSentAt[3]);
+});
+
+test('scanAndFollowup() does NOT fire the stage-3 trigger at that SAME instant when app_config.timezone is left at the default Mexico City (regression guard for the wiring itself)', async () => {
+  const db = freshDb();
+  // app_config.timezone left at its schema default (America/Mexico_City).
+  const now = Date.UTC(2030, 0, 16, 15, 5, 0); // 09:05 Mexico City — not 10am there
+  const phone = '5215500000001';
+  seedStalledConversation(db, phone, now, 20 * HOUR, {
+    stagesSent: { 1: new Date(now - 19 * HOUR).toISOString(), 2: new Date(now - 18 * HOUR).toISOString() },
+  });
+  const fetchImpl = fakeFetch();
+
+  await scanAndFollowup(db, { fetchImpl, now });
+
+  assert.equal(fetchImpl.calls.length, 0); // stages 1+2 already sent, not 10am Mexico -> nothing to send
 });
 
 test('scanAndFollowup() does not send stage 3 outside the 10am Mexico window even if stage 2 was sent', async () => {
