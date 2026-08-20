@@ -137,11 +137,10 @@ CREATE TABLE IF NOT EXISTS orders (
 --     equivalent, conv.followup.sent, lived only in the in-memory/JSON
 --     snapshot of a single scan cycle's read — this column is read fresh
 --     from disk on every scan instead).
---   * contact_name / business_name — nullable; populated by a FUTURE phase
---     that wires the already-existing [DATOS_CONTACTO] effect (see
---     src/agent/effects/contact-data.js's own "FUTURE INJECTION POINT"
---     comment, written in PR9) to upsert onto this row. Deliberately NOT
---     wired in this phase — out of this phase's narrow scope.
+--   * contact_name / business_name — nullable; populated by the
+--     [DATOS_CONTACTO] effect (src/agent/effects/contact-data.js, wired to
+--     src/db/conversations.js's setContactInfo() as of PR17 — closes the
+--     "FUTURE INJECTION POINT" this comment documented since PR9).
 --
 -- Conversation-level pause/archived/status/message-limit guards were flagged
 -- as still out of scope through PR9-PR12 — Phase 11 (panel ChatView, this

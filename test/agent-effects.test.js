@@ -39,6 +39,7 @@ const { confirmOrder } = require('../src/agent/effects/order');
 const { sendPhoto } = require('../src/agent/effects/photos');
 const appointments = require('../src/db/appointments');
 const orders = require('../src/db/orders');
+const conversations = require('../src/db/conversations');
 const googleCalendar = require('../src/integrations/google-calendar');
 
 let prevKey;
@@ -115,15 +116,48 @@ test('escalateHuman() never throws even when the notification send fails', async
   await assert.doesNotReject(() => escalateHuman({ reason: 'x', from: '5215500000001' }, { db, fetchImpl }));
 });
 
-// ── captureContactData ───────────────────────────────────────────────────
+// ── captureContactData — REAL persistence as of PR17 ─────────────────────
+// Wired onto src/db/conversations.js's setContactInfo() (closes PR9's
+// documented "FUTURE INJECTION POINT" — the `conversations` table has
+// existed since PR12). `{captured: true}` alone no longer means much on its
+// own — `persisted` tells a future caller whether the write actually
+// happened.
 
-test('captureContactData() resolves without throwing and reports it captured the data', async () => {
+test('captureContactData() resolves without throwing and reports captured:true even with no ctx at all', async () => {
   const result = await captureContactData({ name: 'Ana', business: 'Bella Studio', from: '5215500000001' });
   assert.equal(result.captured, true);
+  assert.equal(result.persisted, false);
 });
 
-test('captureContactData() handles empty name/business without throwing', async () => {
-  await assert.doesNotReject(() => captureContactData({ name: '', business: '', from: '5215500000001' }));
+test('captureContactData() handles empty name/business without throwing, and reports persisted:false (nothing to write)', async () => {
+  const db = freshDb();
+  const result = await captureContactData({ name: '', business: '', from: '5215500000001' }, { db });
+  assert.equal(result.captured, true);
+  assert.equal(result.persisted, false);
+});
+
+test('captureContactData() persists onto the conversations table when db + from are present and at least one field is non-empty', async () => {
+  const db = freshDb();
+  const result = await captureContactData({ name: 'Ana', business: 'Bella Studio', from: '5215500000001' }, { db });
+  assert.equal(result.captured, true);
+  assert.equal(result.persisted, true);
+
+  const conv = conversations.getConversation(db, '5215500000001');
+  assert.equal(conv.contactName, 'Ana');
+  assert.equal(conv.businessName, 'Bella Studio');
+});
+
+test('captureContactData() degrades gracefully (persisted:false, no throw) when db is missing from ctx', async () => {
+  const result = await captureContactData({ name: 'Ana', business: 'Bella Studio', from: '5215500000001' }, {});
+  assert.equal(result.captured, true);
+  assert.equal(result.persisted, false);
+});
+
+test('captureContactData() degrades gracefully (persisted:false, no throw) when from is missing', async () => {
+  const db = freshDb();
+  const result = await captureContactData({ name: 'Ana', business: 'Bella Studio' }, { db });
+  assert.equal(result.captured, true);
+  assert.equal(result.persisted, false);
 });
 
 // ── confirmAppointment — REAL (tasks.md Phase 8) ─────────────────────────
@@ -191,6 +225,44 @@ test('confirmAppointment() rejects a resolved time already in the past and does 
   const notifyCall = fetchImpl.calls.find((c) => c.url.includes('/messages'));
   assert.ok(notifyCall);
   assert.match(JSON.parse(notifyCall.opts.body).text.body, /ya pasó/);
+});
+
+// ── app_config.timezone wiring (PR17) ────────────────────────────────────
+// The past-time guard's comparison instant is computed by toApptDate() —
+// threading app_config.timezone through it must actually change the
+// ok/past_time decision, not just run without crashing.
+
+test('confirmAppointment() uses the DEFAULT (Mexico City, UTC-6) timezone when app_config.timezone is left at its default', async () => {
+  const db = freshDb();
+  activateMeta(db);
+  const fetchImpl = fakeMetaFetch();
+  // "2030-01-15T15:00:00" in Mexico City (UTC-6) resolves to 21:00 UTC —
+  // still in the future relative to `now` (19:00 UTC).
+  const now = Date.UTC(2030, 0, 15, 19, 0, 0);
+  const result = await confirmAppointment(
+    { servicio: 'Corte', fecha: '2030-01-15', hora: '15:00', duracion: '30', pago: 'al_llegar', total: 0, from: '5215500000001' },
+    { db, fetchImpl, now }
+  );
+  assert.equal(result.ok, true);
+});
+
+test('confirmAppointment() reads app_config.timezone (not a hardcoded Mexico City offset) — the SAME booking flips to past_time under a different configured zone', async () => {
+  const db = freshDb();
+  activateMeta(db);
+  store.updateAppConfig(db, { timezone: 'America/Sao_Paulo' }); // UTC-3, 3h ahead of Mexico City
+  const fetchImpl = fakeMetaFetch();
+  // Same naive "2030-01-15T15:00:00", but interpreted as Sao Paulo (UTC-3)
+  // resolves to 18:00 UTC — now BEHIND `now` (19:00 UTC), so it must be
+  // rejected as past. If app_config.timezone were ignored (still hardcoded
+  // to Mexico City), this would resolve to 21:00 UTC and wrongly succeed —
+  // this assertion would fail, proving the wiring actually matters.
+  const now = Date.UTC(2030, 0, 15, 19, 0, 0);
+  const result = await confirmAppointment(
+    { servicio: 'Corte', fecha: '2030-01-15', hora: '15:00', duracion: '30', pago: 'al_llegar', total: 0, from: '5215500000001' },
+    { db, fetchImpl, now }
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'past_time');
 });
 
 test('confirmAppointment() rejects a slot already booked by a DIFFERENT customer', async () => {

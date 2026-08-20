@@ -84,3 +84,34 @@ test('toApptDate() returns an Invalid Date for a malformed input rather than thr
   assert.doesNotThrow(() => toApptDate('not-a-date'));
   assert.equal(Number.isNaN(toApptDate('not-a-date').getTime()), true);
 });
+
+// ── app_config.timezone wiring (PR17) ─────────────────────────────────────
+// Both functions now read a `timezoneName` option (defaulting to Mexico
+// City if omitted, preserving every assertion above unchanged) through
+// src/agent/timezone.js instead of a hardcoded offset constant.
+
+test('parseFlexDate() resolves "hoy" against a DIFFERENT configured timezone, not a hardcoded Mexico City offset', () => {
+  // Jan 16, 05:30 UTC: Mexico City (UTC-6) reads Jan 15 23:30 (still "today"
+  // is the 15th); Bogota (UTC-5, one hour ahead) has already rolled over to
+  // Jan 16 00:30 — a genuinely different calendar day per zone.
+  const now = Date.UTC(2030, 0, 16, 5, 30, 0);
+  const mxToday = parseFlexDate('hoy', '09:00', { now, timezoneName: 'America/Mexico_City' });
+  const boToday = parseFlexDate('hoy', '09:00', { now, timezoneName: 'America/Bogota' });
+  assert.equal(mxToday, '2030-01-15T09:00:00');
+  assert.equal(boToday, '2030-01-16T09:00:00');
+});
+
+test('parseFlexDate() defaults to Mexico City when no timezoneName is given (unchanged default behavior)', () => {
+  const now = Date.UTC(2030, 0, 16, 5, 30, 0);
+  const withDefault = parseFlexDate('hoy', '09:00', { now });
+  const withExplicitMx = parseFlexDate('hoy', '09:00', { now, timezoneName: 'America/Mexico_City' });
+  assert.equal(withDefault, withExplicitMx);
+});
+
+test('toApptDate() resolves a DIFFERENT real instant for the same naive local string in a DIFFERENT configured timezone', () => {
+  const mx = toApptDate('2030-01-15T15:00:00', 'America/Mexico_City'); // UTC-6
+  const sp = toApptDate('2030-01-15T15:00:00', 'America/Sao_Paulo'); // UTC-3
+  assert.equal(mx.toISOString(), '2030-01-15T21:00:00.000Z');
+  assert.equal(sp.toISOString(), '2030-01-15T18:00:00.000Z');
+  assert.notEqual(mx.getTime(), sp.getTime());
+});

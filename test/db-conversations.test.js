@@ -205,3 +205,39 @@ test('listConversations({includeArchived: true}) includes archived rows', () => 
   assert.equal(conversations.listConversations(db).length, 0);
   assert.equal(conversations.listConversations(db, { includeArchived: true }).length, 1);
 });
+
+// ── setContactInfo() — [DATOS_CONTACTO] persistence (PR17) ───────────────
+
+test('setContactInfo() creates the row (if it does not exist yet) and writes both fields', () => {
+  const db = freshDb();
+  const conv = conversations.setContactInfo(db, '5215500000001', { contactName: 'Ana', businessName: 'Bella Studio' });
+  assert.equal(conv.contactName, 'Ana');
+  assert.equal(conv.businessName, 'Bella Studio');
+  const reread = conversations.getConversation(db, '5215500000001');
+  assert.equal(reread.contactName, 'Ana');
+  assert.equal(reread.businessName, 'Bella Studio');
+});
+
+test('setContactInfo() writes only the non-empty field(s) given', () => {
+  const db = freshDb();
+  conversations.setContactInfo(db, '5215500000001', { contactName: 'Ana', businessName: 'Bella Studio' });
+  const conv = conversations.setContactInfo(db, '5215500000001', { contactName: '', businessName: 'Studio Renamed' });
+  assert.equal(conv.businessName, 'Studio Renamed');
+  assert.equal(conv.contactName, 'Ana'); // untouched by the empty-string field
+});
+
+test('setContactInfo() never blanks out a previously-captured value with an empty string', () => {
+  const db = freshDb();
+  conversations.setContactInfo(db, '5215500000001', { contactName: 'Ana', businessName: 'Bella Studio' });
+  const conv = conversations.setContactInfo(db, '5215500000001', { contactName: '', businessName: '' });
+  assert.equal(conv.contactName, 'Ana');
+  assert.equal(conv.businessName, 'Bella Studio');
+});
+
+test('setContactInfo() with both fields empty/omitted is a no-op that still returns the current row', () => {
+  const db = freshDb();
+  conversations.recordClientMessage(db, '5215500000001', { text: 'hola', now: '2030-01-15T10:00:00.000Z' });
+  const conv = conversations.setContactInfo(db, '5215500000001', {});
+  assert.equal(conv.contactName, null);
+  assert.equal(conv.businessName, null);
+});
