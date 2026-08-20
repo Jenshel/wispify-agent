@@ -17,6 +17,15 @@
 // internal reasoning doesn't eat maxOutputTokens), the MAX_TOKENS
 // single-retry-at-higher-ceiling behavior, and stripping any leaked
 // <think> blocks from the reply as a safety net.
+//
+// Conversation history (PR15, conversation-memory follow-up): generateContent()
+// accepts an optional `history` array of {role: 'user'|'model', text} entries,
+// in chronological order, prepended to `contents` BEFORE the current turn's
+// own entry. This module stays a thin, non-opinionated wrapper (design.md:
+// "Gemini: single provider ... no provider adapter layer") — it trusts the
+// roles it's handed are already Gemini's own literal 'user'/'model' names.
+// Mapping src/db/conversations.js's stored 'bot' role to 'model' happens in
+// src/brain/index.js (via src/brain/history.js), not here.
 
 const { GEMINI_API_BASE } = require('../integrations/gemini');
 
@@ -39,11 +48,20 @@ function buildParts(text, media) {
   return parts;
 }
 
-async function callOnce({ apiKey, model, systemPrompt, text, media, maxOutputTokens, fetchImpl }) {
+/**
+ * @param {Array<{role: 'user'|'model', text: string}>|undefined} history
+ * @returns {Array<object>}
+ */
+function buildHistoryContents(history) {
+  if (!Array.isArray(history) || history.length === 0) return [];
+  return history.map((turn) => ({ role: turn.role, parts: [{ text: turn.text }] }));
+}
+
+async function callOnce({ apiKey, model, systemPrompt, text, media, history, maxOutputTokens, fetchImpl }) {
   const url = `${GEMINI_API_BASE}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
   const body = {
     system_instruction: { parts: [{ text: systemPrompt || '' }] },
-    contents: [{ role: 'user', parts: buildParts(text, media) }],
+    contents: [...buildHistoryContents(history), { role: 'user', parts: buildParts(text, media) }],
     generationConfig: {
       temperature: 0.7,
       maxOutputTokens,
@@ -79,11 +97,12 @@ async function callOnce({ apiKey, model, systemPrompt, text, media, maxOutputTok
 
 /**
  * @param {{apiKey: string, model: string, systemPrompt: string, text: string,
- *   media?: {mimeType: string, data: Buffer|string}|null}} params
+ *   media?: {mimeType: string, data: Buffer|string}|null,
+ *   history?: Array<{role: 'user'|'model', text: string}>}} params
  * @param {{fetchImpl?: typeof fetch}} [opts]
  * @returns {Promise<{ok: boolean, text?: string, error?: string}>}
  */
-async function generateContent({ apiKey, model, systemPrompt, text, media } = {}, { fetchImpl = fetch } = {}) {
+async function generateContent({ apiKey, model, systemPrompt, text, media, history } = {}, { fetchImpl = fetch } = {}) {
   if (!apiKey) return { ok: false, error: 'apiKey is required' };
   if (!model) return { ok: false, error: 'model is required' };
 
@@ -93,6 +112,7 @@ async function generateContent({ apiKey, model, systemPrompt, text, media } = {}
     systemPrompt,
     text,
     media,
+    history,
     maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
     fetchImpl,
   });
@@ -101,12 +121,16 @@ async function generateContent({ apiKey, model, systemPrompt, text, media } = {}
 
   // Truncated — never ship a half-sentence to a real customer. Retry once
   // with a higher ceiling before giving up (source's exact behavior).
+  // History must flow through here too — the retry re-sends the same
+  // request shape, so dropping it would silently lose context on any
+  // truncated reply.
   const retry = await callOnce({
     apiKey,
     model,
     systemPrompt,
     text,
     media,
+    history,
     maxOutputTokens: RETRY_MAX_OUTPUT_TOKENS,
     fetchImpl,
   });

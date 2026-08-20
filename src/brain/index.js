@@ -21,20 +21,21 @@
 // PR6's soul-docs panel editor depends on — a saved edit must be visible
 // on the very next customer message, no restart.
 //
-// Scope note (PR8 / Phase 6): single-turn only. The source system
-// (wa-brain-local/index.js) keeps a rolling conversation-history window
-// (loadHistory() + callGemini(..., conversationHistory)) — this repo has
-// no `conversations` table yet (schema.sql defers it to Phase 8-9), so
-// there is nothing to load a history window FROM.
-//
-// FUTURE HISTORY INJECTION POINT: once that table exists, load its last
-// N turns here (see design.md's Data Flow: "guards(...) -> brain.
-// generateReply(prompt(caps))") and pass them through to
-// src/brain/gemini.js's generateContent() as an ordered array of
-// {role: 'user'|'model', text} entries BEFORE the current turn's contents
-// entry — mirroring the source's callGemini(systemPrompt, userMessage,
-// conversationHistory, media) shape. generateContent() would need a new
-// `history` param threaded into its `contents` array construction.
+// Conversation history (PR15, conversation-memory follow-up): the
+// FUTURE HISTORY INJECTION POINT this comment used to describe (single-turn
+// only, flagged since PR8 — the source system's wa-brain-local/index.js
+// kept a rolling conversation-history window this repo had nothing to load
+// FROM until src/db/conversations.js existed, PR12) is now wired. Every
+// call reads conversations.getConversation(db, from).recentTurns and
+// converts it to Gemini's {role: 'user'|'model', text} shape via
+// src/brain/history.js's buildHistory(), which strips the LAST entry —
+// src/channels/whatsapp/webhook.js's handleIncomingMessage() already calls
+// conversations.recordClientMessage() BEFORE this function runs, so that
+// last entry IS the current live turn and must not be duplicated. History
+// is passed to src/brain/gemini.js's generateContent() as a `history` param,
+// which prepends it to the `contents` array BEFORE the current turn's own
+// entry. If `from` is missing or the conversation doesn't exist yet (first
+// message from this customer), history is simply empty — not an error.
 //
 // PR9 / Phase 7 — control-tag pipeline (design.md "Effect (enforcement)"
 // layer, the hard guarantee behind the prompt's probabilistic protocol
@@ -51,6 +52,8 @@ const store = require('../config/store');
 const capabilities = require('../config/capabilities');
 const { buildSystemPrompt } = require('./prompt');
 const gemini = require('./gemini');
+const { buildHistory } = require('./history');
+const conversations = require('../db/conversations');
 const pipeline = require('../agent/pipeline');
 const { dispatchEffectCalls } = require('../agent/effects');
 
@@ -86,8 +89,15 @@ async function generateReply(db, { text, media, from } = {}, { fetchImpl } = {})
   const caps = capabilities.capabilities(db);
   const systemPrompt = buildSystemPrompt({ appConfig, capabilities: caps });
 
+  // See header comment: `from`'s recentTurns log already contains the
+  // CURRENT inbound message as its last entry (webhook.js records it before
+  // calling here), so buildHistory() drops that last entry — it's handled
+  // separately below as `text`, the live turn.
+  const conversation = from ? conversations.getConversation(db, from) : null;
+  const history = conversation ? buildHistory(conversation.recentTurns) : [];
+
   const result = await gemini.generateContent(
-    { apiKey: creds.api_key, model: creds.model, systemPrompt, text, media },
+    { apiKey: creds.api_key, model: creds.model, systemPrompt, text, media, history },
     { fetchImpl }
   );
 
