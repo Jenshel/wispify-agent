@@ -13,6 +13,9 @@
 // body for every route by the time the webhook router's express.raw()
 // middleware runs.
 
+const fs = require('node:fs');
+const path = require('node:path');
+
 const express = require('express');
 
 const { createWebhookRouter } = require('./channels/whatsapp/webhook');
@@ -34,6 +37,7 @@ const createConversationsRouter = require('./routes/conversations');
  *   sleepImpl?: (ms: number) => Promise<void>,
  *   randomImpl?: () => number,
  *   onMessageProcessed?: (info: object) => void,
+ *   panelDistDir?: string,
  * }} opts
  */
 function createApp({
@@ -47,6 +51,7 @@ function createApp({
   sleepImpl,
   randomImpl,
   onMessageProcessed,
+  panelDistDir = path.join(__dirname, '..', 'panel', 'dist'),
 } = {}) {
   if (!db) throw new Error('createApp() requires a db instance');
 
@@ -64,6 +69,35 @@ function createApp({
   app.use('/api/settings', createSettingsRouter(db, { fetchImpl, verifyRateLimit, oauthStartRateLimit }));
   app.use('/api', createFilesRouter(db, { dataDir }));
   app.use('/api', createConversationsRouter(db));
+
+  // Serve the built admin panel (panel/dist, Vite build output) LAST, after
+  // every API/webhook/payments route above, so a static file or the SPA
+  // catch-all can never shadow an API response. Guarded: panel/dist is
+  // git-ignored and only exists once someone has run `npm run build:panel`
+  // (or the Dockerfile's panel-build stage) — if it's missing, skip mounting
+  // instead of crashing the whole server, and warn once so the gap is
+  // obvious in the logs. panelDistDir is injectable (same DI pattern as
+  // dataDir above) so tests can point it at a fixture dir or a guaranteed-
+  // missing path without touching the real panel/dist.
+  if (fs.existsSync(panelDistDir)) {
+    app.use(express.static(panelDistDir));
+    // Client-side routing fallback. The panel has no router yet (PR13
+    // shipped a single-page Chat/Settings tab switch, no deep links) — this
+    // is still the correct default for an SPA so a future router doesn't
+    // need this file touched again. Never intercepts /api, /webhook, or
+    // /pay routes: those are handled by the routers mounted above and only
+    // reach here if genuinely unmatched, at which point falling through to
+    // index.html would be wrong (the client would get a confusing 200
+    // instead of the API's own 404).
+    app.get('*', (req, res, next) => {
+      if (req.path.startsWith('/api/') || req.path.startsWith('/webhook') || req.path.startsWith('/pay/')) {
+        return next();
+      }
+      res.sendFile(path.join(panelDistDir, 'index.html'));
+    });
+  } else {
+    console.warn('[app] panel/dist not found — admin panel will not be served. Run `npm run build:panel` first.');
+  }
 
   return app;
 }

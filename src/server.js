@@ -7,8 +7,16 @@
 const { getDb } = require('./db');
 const { createApp } = require('./app');
 const store = require('./config/store');
+const { assertAdminPasswordIsSafe } = require('./config/admin-guard');
 const { startAppointmentReminderJob } = require('./jobs/appointment-reminders');
 const { startNudgeJob } = require('./jobs/nudges');
+
+// Launch-readiness guard: refuse to boot on a placeholder/too-short
+// ADMIN_PASSWORD (see src/config/admin-guard.js). Runs first, before the DB
+// even opens, so a misconfigured deployment fails loudly and immediately
+// instead of silently running an internet-facing admin panel with a
+// guessable, publicly-documented default password.
+assertAdminPasswordIsSafe();
 
 const db = getDb();
 store.seedIntegrationsFromEnv(db);

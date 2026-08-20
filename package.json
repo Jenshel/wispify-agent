@@ -8,7 +8,9 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "start": "node src/server.js",
+    "build:panel": "cd panel && npm install && npm run build"
   },
   "repository": {
     "type": "git",

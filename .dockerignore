@@ -1,0 +1,34 @@
+.git
+.github
+
+node_modules
+panel/node_modules
+
+# Local/dev build output — rebuilt fresh inside the image (Dockerfile's
+# panel-build stage); never trust a stale local dist directory.
+panel/dist
+dist
+build
+coverage
+
+# Secrets & runtime data — never bake into an image layer.
+data
+.env
+.env.*
+!.env.example
+*.keyfile
+*.sqlite
+*.sqlite3
+*.db
+
+*.log
+npm-debug.log*
+
+.DS_Store
+.vscode
+.idea
+
+# Tests aren't needed inside the runtime image (only Dockerfile's own COPY
+# instructions decide what ships; this just keeps the build context small).
+test
+panel/test
