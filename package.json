@@ -5,7 +5,7 @@
   "description": "Single-tenant WhatsApp AI agent starter: Meta Cloud API + Google Gemini, with optional Google Calendar booking and Stripe checkout, configured through a guided admin setup screen.",
   "license": "MIT",
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
     "test": "node --test test/*.test.js",
