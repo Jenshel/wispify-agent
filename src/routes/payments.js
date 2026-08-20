@@ -34,17 +34,19 @@
 // branch are both dropped, per the same generic-only scope boundary above),
 // marks it paid, and sends a WhatsApp payment confirmation.
 //
-// GET /pay/:orderId/result — a DELIBERATE, EXPLICITLY-FLAGGED SCOPE GAP: no
-// public-facing confirmation page (the source system's `wispify.app/pago`
-// equivalent) exists anywhere in this repo or in tasks.md's remaining
-// phases (Phase 11 is the admin panel, not a public page). Rather than
-// redirect success_url/cancel_url to a URL that would 404, this route is a
-// minimal, honest, server-rendered placeholder that reads the REAL order
-// status from the DB (never trusts the `?paid=1` query string Stripe's
-// success_url alone would carry — that string only reflects Stripe's
+// GET /pay/:orderId/result — the customer-facing confirmation page a Stripe
+// Checkout redirect (success_url/cancel_url) lands on. Originally shipped
+// (PR11) as "a DELIBERATE, EXPLICITLY-FLAGGED SCOPE GAP" — a bare, unstyled
+// placeholder, since no public-facing confirmation page existed anywhere in
+// tasks.md's phases. This closes that gap: an on-brand, server-rendered
+// page (reusing panel/src/index.css's dark theme + green-accent tokens,
+// inlined here since this page is served outside the panel's React app and
+// can't import that stylesheet directly) that still reads the REAL order
+// status from the DB on every load — the placeholder's core discipline is
+// UNCHANGED, only what's rendered around it changed. `?paid=1` is still
+// never trusted on its own: that query string only reflects Stripe's
 // client-side redirect, not the webhook's server-side confirmation, and the
-// two can race). Whoever builds the eventual public page should replace
-// this route's body, not its callers.
+// two can race.
 
 const express = require('express');
 const crypto = require('crypto');
@@ -111,14 +113,175 @@ function escapeHtml(str) {
   return String(str).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
-/** Minimal placeholder result page — see this file's header comment. */
-function resultPage(title, message) {
+// ── Result page — on-brand, mobile-first, self-contained (server-rendered
+// outside the panel's React app, so it can't import panel/src/index.css —
+// the values below are copied from it, not a new palette). `--pending` /
+// `--pending-bg` are new tokens local to this standalone page only (not
+// added to the shared panel token set): a normal in-flight webhook delay is
+// not an error, so it deliberately does NOT reuse `--danger`. ──────────
+const PAGE_CSS = `
+:root {
+  --bg: #0b0f14;
+  --bg-card: #161c25;
+  --border: rgba(255, 255, 255, 0.08);
+  --text: #f5f7fa;
+  --text-dim: #9aa4b2;
+  --text-mute: #64748b;
+  --accent-green: #2ec78e;
+  --accent-green-deep: #56e3ab;
+  --pending: #f5b942;
+  --pending-bg: rgba(245, 185, 66, 0.12);
+  --font-main: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-main);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+.result-card {
+  width: 100%;
+  max-width: 480px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 32px 28px;
+  text-align: center;
+}
+.brand {
+  font-size: 14px;
+  font-weight: 700;
+  margin: 0 0 20px;
+  background: linear-gradient(135deg, var(--accent-green), var(--accent-green-deep));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.icon {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  margin: 0 auto 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+}
+.icon-success { background: linear-gradient(135deg, var(--accent-green), var(--accent-green-deep)); }
+.icon-success::after {
+  content: '';
+  width: 14px;
+  height: 26px;
+  border: solid #04120c;
+  border-width: 0 4px 4px 0;
+  transform: rotate(45deg) translate(-2px, -3px);
+}
+.icon-pending { background: var(--pending-bg); }
+.icon-pending .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--pending);
+  animation: pulse-dot 1.2s ease-in-out infinite;
+}
+.icon-pending .dot:nth-child(2) { animation-delay: 0.2s; }
+.icon-pending .dot:nth-child(3) { animation-delay: 0.4s; }
+@keyframes pulse-dot {
+  0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
+  40% { opacity: 1; transform: scale(1.1); }
+}
+.icon-muted {
+  background: rgba(154, 164, 178, 0.12);
+  color: var(--text-dim);
+  font-size: 26px;
+  font-weight: 700;
+}
+h1 { font-size: 20px; margin: 0 0 8px; }
+.message { color: var(--text-dim); font-size: 13px; line-height: 1.5; margin: 0; }
+.hint { color: var(--text-mute); font-size: 12px; margin: 12px 0 0; }
+.receipt { width: 100%; border-collapse: collapse; margin-top: 20px; text-align: left; font-size: 13px; }
+.receipt td { padding: 8px 0; border-bottom: 1px solid var(--border); }
+.receipt-qty { color: var(--text-mute); font-size: 12px; }
+.receipt-price { text-align: right; white-space: nowrap; }
+.receipt tfoot td { border-bottom: none; border-top: 1px solid var(--border); padding-top: 12px; font-weight: 700; }
+.receipt-total-value { text-align: right; }
+`;
+
+function pageShell(title, bodyHtml, { autoRefresh = false } = {}) {
   return (
     `<!doctype html><html lang="es"><head><meta charset="utf-8">` +
     `<meta name="viewport" content="width=device-width, initial-scale=1">` +
-    `<title>${escapeHtml(title)}</title></head>` +
-    `<body style="font-family: sans-serif; max-width: 480px; margin: 4rem auto; text-align: center;">` +
-    `<h1>${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p></body></html>`
+    (autoRefresh ? `<meta http-equiv="refresh" content="5">` : '') +
+    `<link rel="preconnect" href="https://fonts.googleapis.com">` +
+    `<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>` +
+    `<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">` +
+    `<title>${escapeHtml(title)}</title><style>${PAGE_CSS}</style></head>` +
+    `<body><main class="result-card">${bodyHtml}</main></body></html>`
+  );
+}
+
+/**
+ * Receipt-style summary of the order's products/total — paid state only.
+ * Pure function (no DB/HTTP access), unit-tested directly.
+ * @param {{products: Array<{name: string, qty: number, price: number}>, total: number, currency: string}} order
+ */
+function renderReceipt(order) {
+  const rows = (order.products || [])
+    .map((p) => {
+      const qty = Number(p.qty) || 1;
+      const lineTotal = (Number(p.price) || 0) * qty;
+      return (
+        `<tr><td>${escapeHtml(p.name || '')} <span class="receipt-qty">× ${qty}</span></td>` +
+        `<td class="receipt-price">$${lineTotal.toFixed(2)}</td></tr>`
+      );
+    })
+    .join('');
+  const total = (Number(order.total) || 0).toFixed(2);
+  return (
+    `<table class="receipt"><tbody>${rows}</tbody><tfoot><tr>` +
+    `<td>Total</td><td class="receipt-total-value">$${total} ${escapeHtml(order.currency || '')}</td>` +
+    `</tr></tfoot></table>`
+  );
+}
+
+function notFoundPage() {
+  return pageShell(
+    'Orden no encontrada',
+    `<div class="brand">Wispify</div>` +
+      `<div class="icon icon-muted">?</div>` +
+      `<h1>Orden no encontrada</h1>` +
+      `<p class="message">No encontramos esa orden. Verifica el enlace o contáctanos si crees que esto es un error.</p>`
+  );
+}
+
+function paidPage(order) {
+  return pageShell(
+    'Pago confirmado',
+    `<div class="brand">Wispify</div>` +
+      `<div class="icon icon-success"></div>` +
+      `<h1>Pago confirmado</h1>` +
+      `<p class="message">¡Gracias por tu compra! Recibimos tu pago correctamente.</p>` +
+      renderReceipt(order)
+  );
+}
+
+function pendingPage() {
+  return pageShell(
+    'Pago pendiente',
+    `<div class="brand">Wispify</div>` +
+      `<div class="icon icon-pending"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>` +
+      `<h1>Pago pendiente</h1>` +
+      `<p class="message">Tu pago no se ha completado o aún se está procesando. Si ya pagaste, esto se actualizará en unos segundos.</p>` +
+      `<p class="hint">Esta página se actualiza sola.</p>`,
+    { autoRefresh: true }
   );
 }
 
@@ -129,16 +292,14 @@ function resultPage(title, message) {
 function createPaymentsRouter(db, { fetchImpl = fetch } = {}) {
   const router = express.Router();
 
-  // ── GET /pay/:orderId/result — placeholder confirmation page ───────────
+  // ── GET /pay/:orderId/result — on-brand confirmation page ──────────────
   router.get('/pay/:orderId/result', (req, res) => {
     const order = orders.getOrderById(db, req.params.orderId);
-    if (!order) return res.status(404).type('html').send(resultPage('Orden no encontrada', 'No encontramos esa orden.'));
+    if (!order) return res.status(404).type('html').send(notFoundPage());
     if (order.status === 'paid') {
-      return res.type('html').send(resultPage('Pago confirmado', '¡Gracias por tu compra! Recibimos tu pago correctamente.'));
+      return res.type('html').send(paidPage(order));
     }
-    return res
-      .type('html')
-      .send(resultPage('Pago pendiente', 'Tu pago no se ha completado o aún se está procesando. Si ya pagaste, esto se actualizará en unos segundos.'));
+    return res.type('html').send(pendingPage());
   });
 
   // ── GET /pay/:orderId — build/redirect to the real Checkout Session ────
@@ -259,4 +420,4 @@ function createPaymentsRouter(db, { fetchImpl = fetch } = {}) {
   return router;
 }
 
-module.exports = { createPaymentsRouter, verifyStripeSignature };
+module.exports = { createPaymentsRouter, verifyStripeSignature, renderReceipt };
