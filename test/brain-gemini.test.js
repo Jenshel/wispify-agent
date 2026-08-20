@@ -156,3 +156,51 @@ test('generateContent() falls back to a generic prompt for media with no text ca
   const textPart = body.contents[0].parts.find((p) => typeof p.text === 'string');
   assert.ok(textPart.text.length > 0, 'must never send an empty text part alongside media');
 });
+
+// ── Conversation history (PR15, conversation-memory follow-up) ──────────────
+// gemini.js stays a thin, non-opinionated wrapper (design.md: "single
+// provider, no adapter layer") — it trusts the roles it's handed are
+// already 'user'/'model' (Gemini's own literal role names). Role mapping
+// from src/db/conversations.js's stored 'bot' happens in src/brain/index.js
+// via src/brain/history.js, NOT here.
+
+test('generateContent() prepends history turns to contents BEFORE the current live turn, mapping role/text as given', async () => {
+  const fetchImpl = fakeFetch(candidateResponse('ok'));
+  const history = [
+    { role: 'user', text: 'Hola' },
+    { role: 'model', text: '¡Hola! ¿En qué te ayudo?' },
+  ];
+  await generateContent(
+    { apiKey: 'k', model: 'gemini-2.5-flash', systemPrompt: 'x', text: 'segundo mensaje', history },
+    { fetchImpl }
+  );
+
+  const body = JSON.parse(fetchImpl.calls[0].opts.body);
+  assert.equal(body.contents.length, 3, 'expected 2 history entries + the current live turn');
+  assert.deepEqual(body.contents[0], { role: 'user', parts: [{ text: 'Hola' }] });
+  assert.deepEqual(body.contents[1], { role: 'model', parts: [{ text: '¡Hola! ¿En qué te ayudo?' }] });
+  assert.equal(body.contents[2].role, 'user');
+  assert.equal(body.contents[2].parts[0].text, 'segundo mensaje');
+});
+
+test('generateContent() omits history entirely from contents when none is passed (unchanged single-turn shape)', async () => {
+  const fetchImpl = fakeFetch(candidateResponse('ok'));
+  await generateContent({ apiKey: 'k', model: 'gemini-2.5-flash', systemPrompt: 'x', text: 'hola' }, { fetchImpl });
+  const body = JSON.parse(fetchImpl.calls[0].opts.body);
+  assert.equal(body.contents.length, 1);
+  assert.deepEqual(body.contents[0], { role: 'user', parts: [{ text: 'hola' }] });
+});
+
+test('generateContent() also includes history in the MAX_TOKENS retry request, not just the first attempt', async () => {
+  const fetchImpl = fakeFetch([candidateResponse('trunc', 'MAX_TOKENS'), candidateResponse('completa', 'STOP')]);
+  const history = [{ role: 'user', text: 'primer mensaje' }];
+  await generateContent(
+    { apiKey: 'k', model: 'gemini-2.5-flash', systemPrompt: 'x', text: 'segundo', history },
+    { fetchImpl }
+  );
+  assert.equal(fetchImpl.calls.length, 2);
+  const retryBody = JSON.parse(fetchImpl.calls[1].opts.body);
+  assert.equal(retryBody.contents.length, 2, 'history must not be dropped on the retry call');
+  assert.deepEqual(retryBody.contents[0], { role: 'user', parts: [{ text: 'primer mensaje' }] });
+  assert.equal(retryBody.contents[1].parts[0].text, 'segundo');
+});

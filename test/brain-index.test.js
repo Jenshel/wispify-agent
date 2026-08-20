@@ -29,6 +29,7 @@ const crypto = require('node:crypto');
 
 const { openDatabase } = require('../src/db');
 const store = require('../src/config/store');
+const conversations = require('../src/db/conversations');
 const { generateReply } = require('../src/brain/index');
 
 let previousEncryptionKey;
@@ -236,4 +237,62 @@ test('generateReply() never throws when the model emits a control tag but no `fr
   activateGemini(db);
   const fetchImpl = fakeGraphAndGemini('Ok.[ESCALAR_HUMANO:motivo]');
   await assert.doesNotReject(() => generateReply(db, { text: 'hola' }, { fetchImpl }));
+});
+
+// ── Conversation memory (PR15) — wires src/db/conversations.js recentTurns
+// through to Gemini as history, closing the FUTURE HISTORY INJECTION POINT
+// this file's own header comment (PR8) documented. ────────────────────────
+
+test('generateReply() passes prior conversation turns as Gemini history, excluding the current turn (already the last recentTurns entry, matching the real webhook.js call order)', async () => {
+  const db = freshDb();
+  activateGemini(db);
+  const from = '5215500000042';
+  conversations.recordClientMessage(db, from, { text: 'Hola' });
+  conversations.recordBotMessage(db, from, { text: '¡Hola! ¿En qué te ayudo?' });
+  // Mirrors src/channels/whatsapp/webhook.js's handleIncomingMessage(): the
+  // CURRENT inbound message is already recorded BEFORE generateReply() runs.
+  conversations.recordClientMessage(db, from, { text: 'quiero info' });
+
+  const fetchImpl = fakeGeminiFetch('Claro, contame qué buscás.');
+  await generateReply(db, { text: 'quiero info', from }, { fetchImpl });
+
+  const body = JSON.parse(fetchImpl.calls[0].opts.body);
+  assert.equal(body.contents.length, 3, 'expected the 2 PRIOR turns as history + the current live turn — NOT the current message counted twice');
+  assert.deepEqual(body.contents[0], { role: 'user', parts: [{ text: 'Hola' }] });
+  assert.equal(body.contents[1].role, 'model');
+  assert.equal(body.contents[1].parts[0].text, '¡Hola! ¿En qué te ayudo?');
+  assert.equal(body.contents[2].role, 'user');
+  assert.equal(body.contents[2].parts[0].text, 'quiero info');
+});
+
+test('generateReply() never sends the current inbound message twice, even though it is already the last recentTurns entry when this function runs', async () => {
+  const db = freshDb();
+  activateGemini(db);
+  const from = '5215500000043';
+  conversations.recordClientMessage(db, from, { text: 'mensaje unico repetido' });
+
+  const fetchImpl = fakeGeminiFetch('ok');
+  await generateReply(db, { text: 'mensaje unico repetido', from }, { fetchImpl });
+
+  const body = JSON.parse(fetchImpl.calls[0].opts.body);
+  const occurrences = body.contents.filter((c) => c.parts.some((p) => p.text === 'mensaje unico repetido'));
+  assert.equal(occurrences.length, 1, 'the current inbound text must appear exactly once in contents, not once as history + once as the live turn');
+});
+
+test('generateReply() sends no history for a brand-new conversation (first-ever message from this customer)', async () => {
+  const db = freshDb();
+  activateGemini(db);
+  const fetchImpl = fakeGeminiFetch('ok');
+  await generateReply(db, { text: 'hola, primera vez', from: '5215500000044' }, { fetchImpl });
+  const body = JSON.parse(fetchImpl.calls[0].opts.body);
+  assert.equal(body.contents.length, 1, 'no conversation row exists yet — history must be empty, not an error');
+});
+
+test('generateReply() sends no history when `from` is missing — defensive, should not happen on the real webhook path', async () => {
+  const db = freshDb();
+  activateGemini(db);
+  const fetchImpl = fakeGeminiFetch('ok');
+  await generateReply(db, { text: 'hola' }, { fetchImpl }); // no `from`
+  const body = JSON.parse(fetchImpl.calls[0].opts.body);
+  assert.equal(body.contents.length, 1);
 });

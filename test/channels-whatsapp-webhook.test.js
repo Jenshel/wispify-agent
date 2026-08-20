@@ -857,6 +857,76 @@ test('POST /webhook — an inbound image message stores mediaUrl + mediaType on 
   }
 });
 
+// ── PR15 (conversation-memory follow-up): real end-to-end proof that the
+// SECOND inbound message in a conversation carries the first exchange as
+// Gemini history, not just that history gets threaded through in isolation ──
+
+test('POST /webhook — the SECOND message in a conversation includes the first user turn and the first bot reply as Gemini history, correctly ordered and role-mapped', async () => {
+  const geminiRequests = [];
+  const replies = ['¡Hola! ¿En qué puedo ayudarte?', 'Claro, te cuento más.'];
+  let replyIndex = 0;
+
+  const fetchImpl = async (url, opts) => {
+    if (url.includes('generativelanguage.googleapis.com')) {
+      geminiRequests.push(JSON.parse(opts.body));
+      const text = replies[replyIndex++] || 'ok';
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ candidates: [{ finishReason: 'STOP', content: { parts: [{ text }] } }] }),
+      };
+    }
+    return { ok: true, status: 200, json: async () => ({ messages: [{ id: 'wamid.fake' }] }) };
+  };
+
+  let resolveProcessed;
+  let processed = new Promise((resolve) => { resolveProcessed = resolve; });
+  const server = await bootServer({ fetchImpl, onMessageProcessed: (info) => resolveProcessed(info) });
+  store.activateIntegration(server.db, 'gemini', {
+    credentials: { api_key: 'AIzaFAKE', model: 'gemini-2.5-flash' },
+    publicMeta: { model: 'gemini-2.5-flash' },
+  });
+  store.setIntegrationEnabled(server.db, 'gemini', true);
+
+  const from = '5215500000099';
+
+  try {
+    const payload1 = textMessagePayload({ from, text: 'Hola, quiero info', messageId: 'wamid.MEM1' });
+    const res1 = await httpPost(server, '/webhook', payload1, {
+      headers: { 'x-hub-signature-256': sign(JSON.stringify(payload1)) },
+    });
+    assert.equal(res1.statusCode, 200);
+    await withTimeout(processed, 2000, 'first message processing');
+
+    processed = new Promise((resolve) => { resolveProcessed = resolve; });
+    const payload2 = textMessagePayload({ from, text: 'Y cuánto cuesta?', messageId: 'wamid.MEM2' });
+    const res2 = await httpPost(server, '/webhook', payload2, {
+      headers: { 'x-hub-signature-256': sign(JSON.stringify(payload2)) },
+    });
+    assert.equal(res2.statusCode, 200);
+    const info2 = await withTimeout(processed, 2000, 'second message processing');
+
+    assert.equal(geminiRequests.length, 2);
+
+    // First request: brand-new conversation, no history yet.
+    assert.equal(geminiRequests[0].contents.length, 1);
+
+    // Second request: history = first user turn + first bot reply, THEN the
+    // current live turn — the current message must never be duplicated.
+    const secondContents = geminiRequests[1].contents;
+    assert.equal(secondContents.length, 3, 'expected 2 history turns + the current live turn');
+    assert.deepEqual(secondContents[0], { role: 'user', parts: [{ text: 'Hola, quiero info' }] });
+    assert.equal(secondContents[1].role, 'model');
+    assert.equal(secondContents[1].parts[0].text, replies[0]);
+    assert.equal(secondContents[2].role, 'user');
+    assert.equal(secondContents[2].parts[0].text, 'Y cuánto cuesta?');
+
+    assert.equal(info2.replyText, replies[1]);
+  } finally {
+    await server.close();
+  }
+});
+
 test('POST /webhook does not crash on an unparseable JSON body even after a valid signature', async () => {
   const server = await bootServer();
   const bodyStr = 'not-json{{{';
