@@ -20,7 +20,7 @@ const { createApp } = require('../src/app');
 const { openDatabase } = require('../src/db');
 const store = require('../src/config/store');
 const orders = require('../src/db/orders');
-const { verifyStripeSignature } = require('../src/routes/payments');
+const { verifyStripeSignature, renderReceipt } = require('../src/routes/payments');
 
 const WEBHOOK_SECRET = 'whsec_test_123';
 
@@ -168,6 +168,49 @@ test('verifyStripeSignature() rejects an empty body', () => {
   assert.equal(result.reason, 'no_body');
 });
 
+// ── renderReceipt() — pure order-summary renderer (paid state) ───────────
+// Extracted as a pure function (extract-before-mock: zero DB/HTTP mocks
+// needed) so the paid state's "show real order details" requirement is
+// unit-testable directly, same precedent as verifyStripeSignature() above.
+
+test('renderReceipt() renders a line per product with escaped name, quantity, and line total', () => {
+  const html = renderReceipt({
+    products: [{ name: 'Camisa Azul', qty: 2, price: 150 }],
+    total: 300,
+    currency: 'MXN',
+  });
+  assert.match(html, /Camisa Azul/);
+  assert.match(html, /×\s*2/);
+  assert.match(html, /300\.00/);
+  assert.match(html, /MXN/);
+});
+
+test('renderReceipt() triangulation: multiple products, singular quantity, different currency/total', () => {
+  const html = renderReceipt({
+    products: [
+      { name: 'Taza', qty: 1, price: 80 },
+      { name: 'Playera', qty: 3, price: 120 },
+    ],
+    total: 440,
+    currency: 'USD',
+  });
+  assert.match(html, /Taza/);
+  assert.match(html, /Playera/);
+  assert.match(html, /×\s*3/);
+  assert.match(html, /440\.00/);
+  assert.match(html, /USD/);
+});
+
+test('renderReceipt() escapes HTML in a product name instead of injecting it raw — same discipline as escapeHtml() elsewhere in this file', () => {
+  const html = renderReceipt({
+    products: [{ name: '<script>alert(1)</script>', qty: 1, price: 10 }],
+    total: 10,
+    currency: 'MXN',
+  });
+  assert.doesNotMatch(html, /<script>alert\(1\)<\/script>/);
+  assert.match(html, /&lt;script&gt;/);
+});
+
 // ── GET /pay/:orderId ──────────────────────────────────────────────────────
 
 test('GET /pay/:orderId returns 404 for an unknown order', async () => {
@@ -275,16 +318,56 @@ test('GET /pay/:orderId reuses a freshly-cached Checkout Session without calling
 // a minimal, honest placeholder so success_url/cancel_url never 404, not a
 // finished UI.
 
-test('GET /pay/:orderId/result reflects the real DB status, not just the query string', async () => {
+test('GET /pay/:orderId/result reflects the real DB status, not just the query string, and shows real order details once paid', async () => {
   const server = await bootServer();
   try {
-    orders.createOrder(server.db, { id: 'ord-5', customerPhone: '5215500000001', products: [{ name: 'X', qty: 1, price: 10 }], total: 10 });
+    orders.createOrder(server.db, {
+      id: 'ord-5',
+      customerPhone: '5215500000001',
+      products: [{ name: 'Camisa Azul', qty: 2, price: 150 }],
+      total: 300,
+      currency: 'MXN',
+    });
     const pending = await httpGetNoFollow(server, '/pay/ord-5/result?paid=1'); // query string LIES — DB still says pending
     assert.match(pending.body, /no.*completad/i);
+    assert.doesNotMatch(pending.body, /Camisa Azul/); // no receipt before it's actually paid
 
     orders.markPaid(server.db, 'ord-5');
     const paid = await httpGetNoFollow(server, '/pay/ord-5/result');
     assert.match(paid.body, /confirmado/i);
+    assert.match(paid.body, /Camisa Azul/);
+    assert.match(paid.body, /300\.00/);
+    assert.match(paid.body, /MXN/);
+  } finally {
+    await server.close();
+  }
+});
+
+test('GET /pay/:orderId/result on an unknown order returns a generic 404 page that never leaks another order\'s details', async () => {
+  const server = await bootServer();
+  try {
+    orders.createOrder(server.db, {
+      id: 'ord-secret',
+      customerPhone: '5215500000009',
+      products: [{ name: 'Producto Confidencial', qty: 1, price: 999 }],
+      total: 999,
+      currency: 'MXN',
+    });
+    const res = await httpGetNoFollow(server, '/pay/does-not-exist/result');
+    assert.equal(res.statusCode, 404);
+    assert.doesNotMatch(res.body, /Producto Confidencial/);
+    assert.doesNotMatch(res.body, /999/);
+  } finally {
+    await server.close();
+  }
+});
+
+test('GET /pay/:orderId/result pending state auto-refreshes so a customer sees the confirmed state without manually reloading', async () => {
+  const server = await bootServer();
+  try {
+    orders.createOrder(server.db, { id: 'ord-10', customerPhone: '5215500000001', products: [{ name: 'X', qty: 1, price: 10 }], total: 10 });
+    const res = await httpGetNoFollow(server, '/pay/ord-10/result');
+    assert.match(res.body, /http-equiv="refresh"/i);
   } finally {
     await server.close();
   }
