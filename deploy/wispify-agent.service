@@ -1,0 +1,36 @@
+# deploy/wispify-agent.service — example systemd unit for maintainers who
+# prefer a bare VPS over Docker. Adjust the paths/user below to your setup,
+# then:
+#
+#   sudo cp deploy/wispify-agent.service /etc/systemd/system/wispify-agent.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now wispify-agent
+#
+# Assumes the repo is checked out at /opt/wispify-agent, `npm ci --omit=dev`
+# and `npm run build:panel` have already been run there, and a real `.env`
+# (copied from .env.example and edited) exists at /opt/wispify-agent/.env —
+# see src/config/admin-guard.js: the service will refuse to start and exit
+# immediately if ADMIN_PASSWORD is still the .env.example placeholder or
+# too short.
+
+[Unit]
+Description=Wispify Agent - WhatsApp AI agent
+After=network.target
+
+[Service]
+Type=simple
+User=wispify
+Group=wispify
+WorkingDirectory=/opt/wispify-agent
+EnvironmentFile=/opt/wispify-agent/.env
+ExecStart=/usr/bin/node /opt/wispify-agent/src/server.js
+Restart=on-failure
+RestartSec=5
+
+# Hardening (optional but recommended — remove any line that conflicts with
+# your platform's actual filesystem layout).
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

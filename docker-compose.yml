@@ -1,0 +1,26 @@
+# docker-compose.yml — single-service deploy for wispify-agent.
+#
+# Usage:
+#   cp .env.example .env   # then edit .env with real values
+#   docker compose up -d --build
+#
+# The `wispify-data` named volume is mounted at /app/data — the same path
+# src/db/index.js and src/config/secrets.js resolve by default — so the
+# SQLite database AND the auto-generated CONFIG_ENCRYPTION_KEY keyfile
+# persist across `docker compose restart`/`down`+`up`. Losing that keyfile
+# would make every previously-saved integration credential unrecoverable,
+# so this volume is not optional.
+services:
+  wispify-agent:
+    build: .
+    image: wispify-agent
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3000}:3000"
+    env_file:
+      - .env
+    volumes:
+      - wispify-data:/app/data
+
+volumes:
+  wispify-data:
