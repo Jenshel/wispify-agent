@@ -1,8 +1,11 @@
 # Wispify Agent
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![Hosted version](https://img.shields.io/badge/hosted%20version-wispify.app-25D366)](https://wispify.app)
 
 A self-hostable WhatsApp AI sales/support agent — one Node process, one WhatsApp number, one business.
+
+> **Don't want to run your own server?** [wispify.app](https://wispify.app) is the managed version of this same engine — multi-business, Stripe/PayPal, guided onboarding, and support, without touching a terminal.
 
 ## What it is
 
@@ -60,6 +63,8 @@ Either way, the server refuses to boot if `ADMIN_PASSWORD` is left at the `.env.
 
 The `data/` directory (the `wispify-data` volume in Docker) holds the SQLite database and the auto-generated encryption keyfile used to seal integration credentials at rest. It must persist across restarts and redeploys — losing the keyfile makes every previously-saved credential unrecoverable.
 
+Not interested in managing a VPS or Docker yourself? [wispify.app](https://wispify.app) runs this for you.
+
 ## Architecture, briefly
 
 Wispify Agent is mono-tenant by design: one deployment runs one business, one WhatsApp number, one admin login — there's no multi-tenant slot system to reason about. Everything lives in a single SQLite database, with integration credentials sealed at rest using AES-256-GCM. Capability gating (what the bot is allowed to offer) is enforced twice: at the prompt level, the system prompt simply never instructs the model to promise booking or payments that aren't configured; at the pipeline level, a control-tag parser strips and drops any tag whose capability is off before it can trigger a real effect — that second layer is the actual guarantee, since prompt compliance alone is only ever probabilistic. The AI brain is Gemini-only; there is no multi-provider abstraction layer.
@@ -94,3 +99,7 @@ This is manual verification only you can do; the codebase can't self-certify it.
 ## License
 
 MIT — see [LICENSE](./LICENSE).
+
+---
+
+Built and maintained by [Wispify](https://wispify.app) — this repo is the open-source core of the same agent we run as a managed, multi-business service.
